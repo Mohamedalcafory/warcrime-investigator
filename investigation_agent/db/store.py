@@ -133,3 +133,42 @@ def search_evidence_text(
         stmt = stmt.where(Evidence.target_query.ilike(tgt))
     stmt = stmt.order_by(Evidence.created_at.desc()).limit(limit)
     return list(session.scalars(stmt).all())
+
+
+def get_evidence_by_ids(session: Session, ids: list[int]) -> list[Evidence]:
+    """Fetch evidence rows by primary key (preserves input order)."""
+    if not ids:
+        return []
+    stmt = select(Evidence).where(Evidence.id.in_(ids))
+    rows = {r.id: r for r in session.scalars(stmt).all()}
+    return [rows[i] for i in ids if i in rows]
+
+
+def get_evidence_by_target(
+    session: Session,
+    *,
+    target_substring: str,
+    limit: int = 50,
+) -> list[Evidence]:
+    """Most recent evidence whose target_query matches substring."""
+    like = f"%{target_substring}%"
+    stmt = (
+        select(Evidence)
+        .where(Evidence.target_query.ilike(like))
+        .order_by(Evidence.created_at.desc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def update_classification_json(
+    session: Session,
+    evidence_id: int,
+    json_str: str,
+) -> Evidence | None:
+    """Persist LLM extraction JSON for one evidence row."""
+    row = session.get(Evidence, evidence_id)
+    if row is None:
+        return None
+    row.classification_json = json_str
+    return row

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -42,6 +42,20 @@ def init_db() -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite_columns(engine)
+
+
+def _migrate_sqlite_columns(engine: Engine) -> None:
+    """Add columns introduced after first deploy (SQLite has limited ALTER)."""
+    if not str(engine.url).startswith("sqlite"):
+        return
+    insp = inspect(engine)
+    if not insp.has_table("evidence"):
+        return
+    cols = {c["name"] for c in insp.get_columns("evidence")}
+    if "classification_json" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE evidence ADD COLUMN classification_json TEXT"))
 
 
 def get_session_factory() -> sessionmaker[Session]:

@@ -66,4 +66,7 @@ class Evidence(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    # JSON string: LLM extraction output (facility, location, etc.)
+    classification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     search_run: Mapped["SearchRun | None"] = relationship(back_populates="evidence")

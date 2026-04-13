@@ -60,3 +60,19 @@ def data_dir() -> Path:
     d = _project_root / "data"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def ollama_base_url() -> str:
+    return _get("OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434"
+
+
+def ollama_model() -> str:
+    return _get("OLLAMA_MODEL", "qwen2.5:3b-instruct") or "qwen2.5:3b-instruct"
+
+
+def ollama_timeout_seconds() -> float:
+    raw = _get("OLLAMA_TIMEOUT_SECONDS", "120")
+    try:
+        return float(raw or "120")
+    except ValueError:
+        return 120.0

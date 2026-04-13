@@ -38,6 +38,36 @@ investigate list --target "Shifa"
 investigate search "emergency" --target "Shifa"
 ```
 
+## Local LLM (Ollama)
+
+Install [Ollama](https://ollama.com/) and pull the default model used by this project:
+
+```bash
+ollama pull qwen2.5:3b-instruct
+```
+
+Configure in `config/.env`:
+
+- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
+- `OLLAMA_MODEL` (must match a model you have pulled)
+- `OLLAMA_TIMEOUT_SECONDS`
+
+Then:
+
+```bash
+# Summarize a batch (asks model for citation-style bullets; always lists batch URLs)
+investigate summarize --target "مجمع الشفاء الطبي" --limit 8
+
+investigate summarize --ids 58,56
+
+# Structured extraction per row (JSON stored in DB column classification_json)
+investigate extract --target "مجمع الشفاء الطبي" --limit 10
+
+investigate extract --ids 58,55
+```
+
+Extraction is analyst aid only — verify against sources.
+
 ## Data
 
 By default the database is `./data/investigation.db` (created automatically).
