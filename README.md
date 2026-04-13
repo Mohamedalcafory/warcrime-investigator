@@ -49,6 +49,21 @@ investigate review set --ids 58,56 --status approved
 investigate summarize --target "مجمع" --limit 8 --approved-only
 ```
 
+`investigate fetch` prints ingestion stats: Telegram inserted vs deduped, web inserted vs URL/body-hash dedupes, and counts of inserted rows whose fetch status was not `ok`.
+
+### Candidate clusters (heuristic matching)
+
+After you have evidence (and optionally `investigate extract` for richer `classification_json`), you can generate **pending** candidate bundles for analyst review. Nothing is auto-confirmed.
+
+```bash
+investigate candidates generate --evidence-limit 200 --min-score 0.45
+investigate candidates list --status pending
+investigate candidates approve --id 1
+investigate candidates reject --id 2 --note "different incident"
+investigate candidates merge --into 1 --from 3
+investigate candidates split --cluster 1 --evidence-id 42
+```
+
 ChromaDB files live under `./data/chroma` by default. Override with `CHROMA_PERSIST_DIR` in `config/.env`.
 
 **First run:** The default embedding model (~80MB ONNX) is downloaded once to your Chroma cache (e.g. `~/.cache/chroma/`). The first `reindex` or `semantic-search` after install may take a minute while that completes.
@@ -86,6 +101,16 @@ Extraction is analyst aid only — verify against sources.
 ## Data
 
 By default the database is `./data/investigation.db` (created automatically).
+
+Main tables:
+
+- **`search_runs`** — one row per `investigate fetch` invocation (target, language, flags).
+- **`search_results`** — one row per DuckDuckGo result for that run (rank, URL, snippet, engine, language, fetch status, optional error detail). Linked from **`evidence`** via `search_result_id` when a row was ingested from web.
+- **`sources`** — optional registered origins (e.g. web domain) for provenance.
+- **`evidence`** — stored items with `normalized_url` for deduplication, `content_hash`, and analyst **`review_status`**.
+- **`candidate_clusters`** / **`candidate_evidence_links`** — heuristic groupings for manual review (scores and textual **reasons** on each link).
+
+Run tests (dev): `pip install -e ".[dev]"` then `pytest`.
 
 ## License
 

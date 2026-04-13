@@ -25,3 +25,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["investigation_agent"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]

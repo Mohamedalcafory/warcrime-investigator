@@ -15,15 +15,24 @@ from rich.table import Table
 from investigation_agent.config import telegram_channels
 from investigation_agent.db.session import get_session_factory, init_db
 from investigation_agent.db.schema import Evidence
+from investigation_agent.db.insert_types import InsertStatus
+from investigation_agent.processor.review_queue import generate_candidate_clusters
 from investigation_agent.db.store import (
     add_search_run,
+    create_search_result,
+    get_cluster_evidence_ids,
     get_evidence_by_ids,
     get_evidence_by_target,
+    get_or_create_web_source,
     insert_evidence,
+    list_candidate_clusters,
     list_evidence,
     list_evidence_by_review_status,
+    merge_candidate_clusters,
     search_evidence_text,
+    set_candidate_cluster_status,
     set_review_status,
+    split_evidence_to_new_cluster,
     update_classification_json,
 )
 from investigation_agent.retrieval.chroma_store import index_evidence_safe, semantic_search as chroma_semantic_search
@@ -41,7 +50,9 @@ from investigation_agent.scraper.web import fetch_web_for_target
 
 app = typer.Typer(help="Target-driven evidence collection (Telegram search + web)")
 review_app = typer.Typer(help="Analyst review status for evidence rows")
+candidates_app = typer.Typer(help="Candidate evidence bundles (heuristic matching; analyst review)")
 app.add_typer(review_app, name="review")
+app.add_typer(candidates_app, name="candidates")
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -74,7 +85,11 @@ def cmd_fetch(
         session.commit()
         run_id = run.id
         added_tg = 0
+        dup_tg = 0
         added_web = 0
+        dup_web_url = 0
+        dup_web_hash = 0
+        web_failed_status: dict[str, int] = {}
 
         if telegram:
             channels = telegram_channels()
@@ -90,7 +105,7 @@ def cmd_fetch(
                 console.print(f"[yellow]Telegram skipped:[/yellow] {e}")
                 hits = []
             for h in hits:
-                row = insert_evidence(
+                row, st = insert_evidence(
                     session,
                     search_run_id=run_id,
                     target_query=target,
@@ -103,8 +118,10 @@ def cmd_fetch(
                     message_id=h.message_id,
                     fetch_status="ok",
                 )
-                if row:
+                if st == InsertStatus.INSERTED:
                     added_tg += 1
+                elif st == InsertStatus.DUPLICATE_TELEGRAM:
+                    dup_tg += 1
             session.commit()
 
         if web:
@@ -114,7 +131,21 @@ def cmd_fetch(
                 console.print(f"[red]Web search failed:[/red] {e}")
                 web_hits = []
             for wh in web_hits:
-                row = insert_evidence(
+                sr = create_search_result(
+                    session,
+                    search_run_id=run_id,
+                    result_rank=wh.rank,
+                    result_url=wh.url,
+                    result_title=wh.title or None,
+                    result_snippet=wh.snippet or None,
+                    engine="duckduckgo",
+                    language=lang,
+                    fetch_status=wh.fetch_status,
+                    fetch_error_detail=wh.fetch_error_detail,
+                )
+                src = get_or_create_web_source(session, result_url=wh.url)
+                sid = src.id if src else None
+                row, st = insert_evidence(
                     session,
                     search_run_id=run_id,
                     target_query=target,
@@ -127,16 +158,27 @@ def cmd_fetch(
                     serp_snippet=wh.snippet,
                     fetch_status=wh.fetch_status,
                     published_at=wh.published_at,
+                    search_result_id=sr.id,
+                    source_id=sid,
                 )
-                if row:
+                if st == InsertStatus.INSERTED:
                     added_web += 1
+                    if wh.fetch_status != "ok":
+                        web_failed_status[wh.fetch_status] = web_failed_status.get(wh.fetch_status, 0) + 1
+                elif st == InsertStatus.DUPLICATE_URL:
+                    dup_web_url += 1
+                elif st == InsertStatus.DUPLICATE_HASH:
+                    dup_web_hash += 1
             session.commit()
 
         console.print(
-            f"[green]Done[/green] run_id={run_id} "
-            f"telegram+{added_tg} web+{added_web} "
-            f"(target={target!r})"
+            f"[green]Done[/green] run_id={run_id} target={target!r}\n"
+            f"  telegram: inserted={added_tg} deduped={dup_tg}\n"
+            f"  web: inserted={added_web} dedup_url={dup_web_url} dedup_body={dup_web_hash}"
         )
+        if web_failed_status:
+            parts = [f"{k}={v}" for k, v in sorted(web_failed_status.items())]
+            console.print(f"  web inserted with non-ok status: {', '.join(parts)}")
     finally:
         session.close()
 
@@ -284,6 +326,121 @@ def cmd_review_set(
         n = set_review_status(session, id_list, status)
         session.commit()
         console.print(f"[green]Updated[/green] {n} row(s) to {status!r}")
+    finally:
+        session.close()
+
+
+@candidates_app.command("generate")
+def cmd_candidates_generate(
+    evidence_limit: Annotated[int, typer.Option("--evidence-limit", help="Recent evidence rows to scan")] = 200,
+    min_score: Annotated[float, typer.Option("--min-score", help="Minimum pair score to create a cluster")] = 0.45,
+) -> None:
+    """Create pending candidate clusters from heuristic pair scores (conservative)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        n = generate_candidate_clusters(session, evidence_limit=evidence_limit, min_score=min_score)
+        session.commit()
+        console.print(f"[green]Created[/green] {n} candidate cluster(s).")
+    finally:
+        session.close()
+
+
+@candidates_app.command("list")
+def cmd_candidates_list(
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="pending | approved | rejected | merged"),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 30,
+) -> None:
+    """List candidate clusters with evidence ids."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        rows = list_candidate_clusters(session, status=status, limit=limit)
+        if not rows:
+            console.print("No candidate clusters. Run [bold]investigate candidates generate[/bold]")
+            return
+        for c in rows:
+            eids = get_cluster_evidence_ids(session, c.id)
+            console.print(
+                f"[bold]{c.id}[/bold] {c.status}  evidence_ids={eids}"
+                + (f"  note={c.reviewer_note!r}" if c.reviewer_note else ""),
+                markup=False,
+            )
+    finally:
+        session.close()
+
+
+@candidates_app.command("approve")
+def cmd_candidates_approve(
+    cluster_id: Annotated[int, typer.Option("--id", help="Candidate cluster id")],
+    note: Annotated[str | None, typer.Option("--note")] = None,
+) -> None:
+    Session = get_session_factory()
+    session = Session()
+    try:
+        row = set_candidate_cluster_status(session, cluster_id, "approved", reviewer_note=note)
+        if row is None:
+            console.print("[red]Cluster not found[/red]")
+            raise typer.Exit(1)
+        session.commit()
+        console.print(f"[green]Cluster {cluster_id} approved[/green]")
+    finally:
+        session.close()
+
+
+@candidates_app.command("reject")
+def cmd_candidates_reject(
+    cluster_id: Annotated[int, typer.Option("--id", help="Candidate cluster id")],
+    note: Annotated[str | None, typer.Option("--note")] = None,
+) -> None:
+    Session = get_session_factory()
+    session = Session()
+    try:
+        row = set_candidate_cluster_status(session, cluster_id, "rejected", reviewer_note=note)
+        if row is None:
+            console.print("[red]Cluster not found[/red]")
+            raise typer.Exit(1)
+        session.commit()
+        console.print(f"[yellow]Cluster {cluster_id} rejected[/yellow]")
+    finally:
+        session.close()
+
+
+@candidates_app.command("merge")
+def cmd_candidates_merge(
+    into: Annotated[int, typer.Option("--into", help="Cluster id to keep")],
+    merge_from: Annotated[int, typer.Option("--from", help="Cluster id to merge into --into and remove")],
+) -> None:
+    Session = get_session_factory()
+    session = Session()
+    try:
+        ok = merge_candidate_clusters(session, keep_id=into, merge_id=merge_from)
+        if not ok:
+            console.print("[red]Merge failed (ids missing or invalid)[/red]")
+            raise typer.Exit(1)
+        session.commit()
+        console.print(f"[green]Merged cluster {merge_from} into {into}[/green]")
+    finally:
+        session.close()
+
+
+@candidates_app.command("split")
+def cmd_candidates_split(
+    cluster_id: Annotated[int, typer.Option("--cluster", help="Source cluster id")],
+    evidence_id: Annotated[int, typer.Option("--evidence-id", help="Evidence row to move to a new cluster")],
+) -> None:
+    Session = get_session_factory()
+    session = Session()
+    try:
+        new_c = split_evidence_to_new_cluster(session, from_cluster_id=cluster_id, evidence_id=evidence_id)
+        if new_c is None:
+            console.print("[red]Split failed (link not found)[/red]")
+            raise typer.Exit(1)
+        session.commit()
+        console.print(f"[green]Created cluster {new_c.id} with evidence {evidence_id}[/green]")
     finally:
         session.close()
 
