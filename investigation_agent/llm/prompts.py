@@ -39,6 +39,8 @@ Write a concise bullet-point summary. Each line must end with [evidence:ID]."""
 
 EXTRACT_SYSTEM = """You extract structured fields about a possible ATTACK ON A CIVIL FACILITY from one evidence item (not legal proof).
 Focus on the violent event against the site (bombing, shelling, strike, raid, fire, siege, etc.), not general background about the facility.
+Distinguish: (1) the facility or its grounds/assets were targeted or hit, (2) violence only near/adjacent to the site, (3) the facility is only background or the speaker's role (e.g. director discussing events elsewhere).
+
 Return ONLY a single JSON object with keys:
 - facility_name (string or empty)
 - facility_type: one of hospital, school, shelter, mosque, clinic, other, unknown
@@ -50,7 +52,18 @@ Return ONLY a single JSON object with keys:
 - damage_text (string or empty; damage to the facility or patients/staff)
 - casualties_text (string or empty)
 - perpetrator_claim_text (string or empty; who is blamed or said to have carried out the attack, if stated)
-- confidence (number from 0 to 1)
+- facility_attack_relation: one of
+  direct_hit (the building/main site was struck or clearly targeted),
+  inside_compound (violence inside the facility grounds/compound but not necessarily the main building),
+  adjacent_or_nearby (blast/strike near the facility; facility not clearly the aim),
+  associated_asset_hit (ambulance, gate, shelter in compound, staff/patients as targets in a facility-linked incident),
+  facility_used_as_context_only (facility named only as location of speaker, general news, or atrocities elsewhere),
+  no_attack_on_facility (no attack on a civil facility described),
+  unclear
+- facility_target_object: one of
+  main_building, hospital_compound, ambulance, shelter_in_compound, entrance_gate, surrounding_area, staff, patients, unknown
+- facility_attack_relation_confidence (number from 0 to 1; how sure you are about facility_attack_relation)
+- confidence (number from 0 to 1; overall extraction confidence)
 No markdown, no commentary outside JSON."""
 
 
@@ -70,6 +83,8 @@ Return the JSON object only."""
 
 CLASSIFY_SYSTEM = """You classify a single evidence text for analyst triage (not legal proof).
 The focus is violence against CIVILIAN infrastructure (hospitals, schools, shelters, places of worship, etc.), not general news mentioning a facility.
+Distinguish: direct attack on a facility vs attack nearby vs facility only as context (e.g. spokesperson at a hospital discussing events elsewhere).
+
 Return ONLY one JSON object with these EXACT keys (no extras, no markdown):
 - civilian_deaths (boolean)
 - targeting_civilians (boolean)
@@ -83,10 +98,14 @@ Return ONLY one JSON object with these EXACT keys (no extras, no markdown):
 For EACH flag above, also output <flag_name>_confidence as a number from 0 to 1.
 - civil_facility_attack_relevance (number 0 to 1): how strongly this text is about an attack on a civil facility (not general facility operations)
 - civil_facility_attack_rationale (short string: one sentence, same language as the text when possible)
+- facility_attack_relation: one of
+  direct_hit, inside_compound, adjacent_or_nearby, associated_asset_hit,
+  facility_used_as_context_only, no_attack_on_facility, unclear
+- facility_attack_relation_confidence (number 0 to 1)
 - explanation (short string: why these labels, same language as the text when possible)
 - overall_confidence (number 0 to 1)
 
-Use true/false only for booleans. If the text is irrelevant or insufficient, set all flags false, set civil_facility_attack_relevance to 0, and explain briefly."""
+Use true/false only for booleans. If the text is irrelevant or insufficient, set all flags false, set civil_facility_attack_relevance to 0, set facility_attack_relation to unclear or no_attack_on_facility as appropriate, and explain briefly."""
 
 
 def classify_user_prompt(evidence_id: int, url: str, source_type: str, text: str) -> str:

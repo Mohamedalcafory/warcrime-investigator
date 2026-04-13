@@ -11,6 +11,8 @@ def test_normalize_war_crimes_classifier_defaults():
         assert f"{k}_confidence" in out
     assert "explanation" in out
     assert "overall_confidence" in out
+    assert out.get("facility_attack_relation") == "unclear"
+    assert out.get("facility_attack_relation_confidence") == 0.0
 
 
 def test_normalize_war_crimes_classifier_parses_strings():

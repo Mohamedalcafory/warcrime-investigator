@@ -7,14 +7,42 @@ from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
 from investigation_agent.db.schema import Evidence
-from investigation_agent.processor.classifier import civil_facility_attack_relevance
+from investigation_agent.processor.classifier import (
+    civil_facility_attack_relevance,
+    classifier_facility_attack_relation,
+)
 from investigation_agent.processor.extractor import (
     attack_occurred,
     attack_type,
+    facility_attack_relation,
     facility_name,
     facility_type,
     location_guess,
 )
+
+
+def _relation_for_matching(ev: Evidence) -> str | None:
+    """Prefer extraction merge fields, then classifier triage."""
+    r = facility_attack_relation(ev)
+    if r:
+        return r
+    return classifier_facility_attack_relation(ev)
+
+
+_STRONG_REL = frozenset({"direct_hit", "inside_compound", "associated_asset_hit"})
+_NEAR_REL = frozenset({"adjacent_or_nearby"})
+
+
+def _relations_compatible(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a in _STRONG_REL and b in _STRONG_REL:
+        return True
+    if (a in _STRONG_REL and b in _NEAR_REL) or (b in _STRONG_REL and a in _NEAR_REL):
+        return True
+    return False
 
 
 def normalize_reason_labels(reasons: list[str]) -> list[str]:
@@ -91,6 +119,18 @@ def pair_score(a: Evidence, b: Evidence) -> tuple[float, list[str]]:
     if ra >= 0.55 and rb >= 0.55:
         score += 0.12
         reasons.append("high_civil_facility_attack_relevance")
+
+    rel_a, rel_b = _relation_for_matching(a), _relation_for_matching(b)
+    if rel_a == "facility_used_as_context_only" or rel_b == "facility_used_as_context_only":
+        score -= 0.40
+        reasons.append("penalty:facility_attack_context_only")
+    if rel_a and rel_b:
+        if rel_a == rel_b and rel_a not in ("unclear", "no_attack_on_facility"):
+            score += 0.10
+            reasons.append("same_facility_attack_relation")
+        elif _relations_compatible(rel_a, rel_b):
+            score += 0.08
+            reasons.append("compatible_facility_attack_relation")
 
     if _same_calendar_day(a.published_at, b.published_at):
         score += 0.12

@@ -1,13 +1,47 @@
 # Investigation Agent
 
-Collect and triage evidence about **attacks on civil facilities** (hospitals, schools, shelters, places of worship, etc.) for a **named target** by:
+Collect and triage evidence about **attacks on civil facilities** (hospitals, schools, shelters, places of worship, etc.) for a **named target**.
 
-- Searching configured **Telegram channels** for messages matching the target (not full-channel dumps).
-- Running a **bilingual (Arabic + English) keyword web search** and extracting article text.
+**Sources**
 
-**Ingestion filter:** Telegram and web hits are stored only if they pass a deterministic keyword check for **civil-facility context** and **attack/violence** language (English + Arabic). General facility news (e.g. reopenings, equipment) without attack language is dropped. Tune or extend keywords in `investigation_agent/processor/attack_filter.py` if needed.
+- Configured **Telegram** channels (search by target; not full-channel dumps).
+- **Bilingual web search** (Arabic + English) with article text extraction.
 
-Everything that passes the filter is stored in **SQLite** with source URLs for manual review.
+**Storage**
+
+Everything that passes the ingest filter is stored in **SQLite** with source URLs for manual review.
+
+---
+
+## Contents
+
+- [How ingestion filters work](#how-ingestion-filters-work)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Fetch output (what the numbers mean)](#fetch-output-what-the-numbers-mean)
+- [Candidate clusters & incidents](#candidate-clusters--incidents)
+- [Local LLM (Ollama)](#local-llm-ollama)
+- [Query, extract, classify](#query-extract-classify)
+- [Command reference](#command-reference)
+- [Data model](#data-model)
+- [License](#license)
+
+---
+
+## How ingestion filters work
+
+Ingestion is **relation-aware**, not just “facility word + attack word” in the same text. Deterministic rules decide whether violence is plausibly tied to a civil facility.
+
+| Kept (examples) | Dropped (examples) |
+|-----------------|-------------------|
+| **Direct hit** on the site | **Context-only** (e.g. hospital director discussing strikes elsewhere with no attack on the site) |
+| **Inside the compound** | **No attack on a civil facility** |
+| **Nearby / adjacent** violence | |
+| **Associated asset** (ambulance, gate, staff/patients in a facility-linked incident) | |
+
+Structured fields **`facility_attack_relation`** and **`facility_target_object`** (from `extract` / `classify`) use the same idea. To tune behavior, edit patterns in `investigation_agent/processor/attack_filter.py` (`infer_facility_attack_relation`).
+
+---
 
 ## Setup
 
@@ -17,50 +51,85 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 cp config/.env.example config/.env
-# Edit config/.env with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, TELEGRAM_CHANNELS
+# Edit config/.env: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, TELEGRAM_CHANNELS
 ```
 
-Environment files are loaded in order (later overrides earlier): `config/.env`, then `.env` at the project root, then `.env` in the current working directory.
+**Environment load order** (later overrides earlier): `config/.env` → `.env` at repo root → `.env` in the current working directory.
 
-First Telegram login will prompt for a code in the terminal and create `investigation_agent_session.session` in the project directory. To reuse an existing Telethon session from another project (same API ID/hash), copy that `.session` file to `investigation_agent_session.session` here.
+**Telegram session:** First login prompts for a code and creates `investigation_agent_session.session` in the project directory. To reuse a Telethon session from another project (same API ID/hash), copy that `.session` file to `investigation_agent_session.session` here.
+
+---
 
 ## Usage
 
+### Fetch, list, search
+
 ```bash
-# Fetch Telegram + web for a target (default: both); non-attack facility-only hits are counted as filtered
+# Telegram + web (default). Rows that fail the ingest filter count as filtered.
 investigate fetch "Al Shifa Hospital"
 
 # Arabic target, web only
 investigate fetch "مستشفى الشفاء" --lang ar --no-telegram
 
-# Optional: restrict web SERP by recency (ddgs timelimit: week | month | year)
+# Web SERP recency: week | month | year (ddgs timelimit)
 investigate fetch "hospital Khan Younis" --web-date-filter month --max-web 20
 
-# List stored evidence (optionally filter by target substring)
+# List / search stored evidence
 investigate list --target "Shifa"
-
-# Search within stored evidence text
 investigate search "emergency" --target "Shifa"
+```
 
-# Semantic search (ChromaDB embeddings; new fetches index automatically)
+### Semantic search (Chroma)
+
+New fetches index into Chroma automatically. For older DBs, run **`reindex`** once.
+
+By default, semantic hits that look like **context-only** or **no attack on the facility** are dropped. To see all embedding neighbors:
+
+```bash
+investigate semantic-search "your query" --no-exclude-relation-negative
+```
+
+Indexed rows include **`facility_attack_relation`** metadata.
+
+```bash
 investigate reindex
 investigate semantic-search "hospital fuel generators" --target "مجمع" --limit 10
+```
 
-# Analyst review (pending | approved | rejected)
+### Review workflow
+
+```bash
 investigate review list --status pending
 investigate review set --ids 58,56 --status approved
-# Inclusive ranges: same as listing every id from 50 through 110
+# Inclusive range = every id from 50 through 110
 investigate review set --ids 50:110 --status approved
 
-# Summarize only approved rows
 investigate summarize --target "مجمع" --limit 8 --approved-only
 ```
 
-`investigate fetch` prints ingestion stats: Telegram inserted vs deduped and **`filtered_non_attack`** (rows skipped by the attack-on-civil-facility filter), **`web_serp=N`** (total unique URLs after bilingual SERP merge and before fetch), **`web_serp_ar`** / **`web_serp_en`** (how many of those URLs came from the Arabic vs English SERP pass; same URL in both counts once, Arabic wins), web inserted vs URL/body-hash dedupes, web **`filtered_non_attack`**, and counts of inserted rows whose fetch status was not `ok`. **`--max-web`** is a **shared cap** across Arabic + English (merged list, deduped by normalized URL). Use **`--web-date-filter`** (`none` \| `week` \| `month` \| `year`) to pass a ddgs **timelimit** on both SERP passes; the run stores this on **`search_runs.web_date_filter`**, and each **`search_results`** row stores **`serp_region`**, **`serp_pass`** (`ar` \| `en`), and **`date_filter_applied`**. Web search uses the **[`ddgs`](https://pypi.org/project/ddgs/)** package. If **`web_serp=0`**, the CLI prints a yellow hint: empty SERP, blocking, or network issues — try again, increase `--max-web`, set **`DDGS_PROXY`** if you need a proxy, or use **`--no-web`** to skip web.
+---
+
+## Fetch output (what the numbers mean)
+
+`investigate fetch` prints ingestion stats. Main ideas:
+
+- **Telegram:** inserted vs deduplicated vs **`filtered_non_attack`** (skipped by the civil-facility attack filter).
+- **Web:** **`web_serp`** = unique URLs after bilingual SERP merge and before fetch. **`web_serp_ar`** / **`web_serp_en`** = how many URLs came from the Arabic vs English pass (same URL in both counts once; Arabic wins).
+- **Web:** inserted vs URL dedupe vs body-hash dedupe vs **`filtered_non_attack`**, plus counts of rows whose fetch status was not `ok`.
+
+**`--max-web`** is a **single cap** shared across Arabic + English (merged list, deduped by normalized URL).
+
+**`--web-date-filter`** (`none` \| `week` \| `month` \| `year`) sets a ddgs **timelimit** on both SERP passes. The run stores this on **`search_runs.web_date_filter`**. Each **`search_results`** row can store **`serp_region`**, **`serp_pass`** (`ar` \| `en`), and **`date_filter_applied`**.
+
+Web search uses the **[ddgs](https://pypi.org/project/ddgs/)** package. If **`web_serp=0`**, the CLI may hint: empty SERP, blocking, or network issues — retry, raise **`--max-web`**, set **`DDGS_PROXY`** if needed, or use **`--no-web`**.
+
+---
+
+## Candidate clusters & incidents
 
 ### Candidate clusters (heuristic matching)
 
-After you have evidence (and optionally `investigate extract` for richer `classification_json`), you can generate **pending** candidate bundles for analyst review. Nothing is auto-confirmed.
+After you have evidence (optionally run **`investigate extract`** for richer `classification_json`), generate **pending** bundles for review. Nothing is auto-confirmed.
 
 ```bash
 investigate candidates generate --evidence-limit 200 --min-score 0.45
@@ -71,9 +140,11 @@ investigate candidates merge --into 1 --from 3
 investigate candidates split --cluster 1 --evidence-id 42
 ```
 
+**Matching:** `candidates generate` prefers compatible **`facility_attack_relation`** pairs and penalizes rows that are **`facility_used_as_context_only`** when relation fields exist in `classification_json`.
+
 ### Incidents (promoted bundles)
 
-After you **approve** a candidate cluster, promote it to an audited **incident** (idempotent). Then list incidents or print a conservative text report.
+Approve a cluster, then promote to an **incident** (idempotent). List incidents or print a report.
 
 ```bash
 investigate candidates approve --id 1
@@ -82,115 +153,116 @@ investigate incidents list
 investigate report 1
 ```
 
-### Assistant and pipeline status (local Ollama)
+### Assistant (`ask`) and status
 
-Requires Ollama running (`ollama serve`). `ask` uses a small ReAct loop with read-only tools over your DB (search evidence, list incidents, cross-reference, summarize, generate report text).
+Requires Ollama (`ollama serve`). `ask` runs a small ReAct loop with read-only tools over your DB.
 
 ```bash
 investigate status
 investigate ask "What evidence mentions schools in Rafah?"
 ```
 
-ChromaDB files live under `./data/chroma` by default. Override with `CHROMA_PERSIST_DIR` in `config/.env`.
+**Chroma:** default path `./data/chroma`. Override with **`CHROMA_PERSIST_DIR`** in `config/.env`.
 
-**First run:** The default embedding model (~80MB ONNX) is downloaded once to your Chroma cache (e.g. `~/.cache/chroma/`). The first `reindex` or `semantic-search` after install may take a minute while that completes.
+**First run:** The default embedding model (~80MB ONNX) downloads once (e.g. under `~/.cache/chroma/`). The first `reindex` or `semantic-search` may take a minute.
+
+---
 
 ## Local LLM (Ollama)
 
-Install [Ollama](https://ollama.com/) and pull the default model used by this project:
+Install [Ollama](https://ollama.com/) and pull the project default model:
 
 ```bash
 ollama pull qwen2.5:3b-instruct
 ```
 
-Configure in `config/.env`:
+Set in `config/.env`:
 
-- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
-- `OLLAMA_MODEL` (must match a model you have pulled)
-- `OLLAMA_TIMEOUT_SECONDS`
+| Variable | Notes |
+|----------|--------|
+| `OLLAMA_BASE_URL` | Default `http://localhost:11434` |
+| `OLLAMA_MODEL` | Must match a model you have pulled |
+| `OLLAMA_TIMEOUT_SECONDS` | |
 
-Then:
+---
+
+## Query, extract, classify
+
+### Summarize, extract, classify
 
 ```bash
-# Summarize a batch (asks model for citation-style bullets; always lists batch URLs)
 investigate summarize --target "مجمع الشفاء الطبي" --limit 8
-
 investigate summarize --ids 58,56
 investigate summarize --ids 60:75
-# Summarize one candidate cluster directly
 investigate summarize --cluster-id 1
 
-# Structured extraction per row (JSON merged into classification_json top-level keys)
 investigate extract --target "مجمع الشفاء الطبي" --limit 10
-
 investigate extract --ids 58,55
 
-# 9-flag war-crimes triage (separate schema; stored under classification_json.war_crimes_classifier)
 investigate classify --target "مجمع" --limit 5
 investigate classify --ids 58,55
 ```
 
-**Extraction vs classification:** `extract` fills facility/location/casualties-style fields. `classify` fills the legacy-compatible **nine boolean signals** plus per-flag confidence and explanation (see Telescraper-style flags in code). Both merge into `classification_json` without wiping the other block.
+**Extract** merges JSON into `classification_json` (top-level keys): facility/location/casualties-style fields plus **`facility_attack_relation`**, **`facility_target_object`**, **`facility_attack_relation_confidence`**.
 
-### Local-first query (semantic + substring, optional fetch)
+**Classify** merges into **`classification_json.war_crimes_classifier`**: nine boolean signals, per-flag confidence, **`facility_attack_relation`** / **`facility_attack_relation_confidence`**, civil-facility relevance, explanation. The two commands **do not wipe each other’s blocks**.
 
-Searches **Chroma** (semantic) and **SQLite** (substring), then summarizes with Ollama. If local hits are below `--fetch-threshold`, runs a normal **`fetch`** (unless `--local-only` or `--no-auto-fetch-on-miss`).
+Extraction and classification are **aids only** — verify against sources.
+
+### Local-first `query`
+
+Combines **Chroma** (semantic; relation-aware filtering on by default) and **SQLite** (substring), then summarizes with Ollama. The CLI prints **`facility_attack_relation_counts`** for rows used in the summary. If local hits fall below **`--fetch-threshold`**, runs **`fetch`** unless **`--local-only`** or **`--no-auto-fetch-on-miss`**.
 
 ```bash
 investigate query "hospital strike Gaza" --fetch-threshold 3
 investigate query "مستشفى" --target "غزة" --local-only
 ```
 
-### Telegram-only scrape (single channel)
+### Other commands
 
 ```bash
 investigate scrape telegram "search phrase" --channel mychannel
+investigate review queue   # same idea as: investigate candidates list --status pending
 ```
-
-### Review queue alias
-
-```bash
-investigate review queue
-# same idea as: investigate candidates list --status pending
-```
-
-Extraction and classification are analyst aids only — verify against sources.
 
 ### Residual risks
 
-- **Web fetch:** many news sites return 403 or fail DNS; you still store the SERP row with non-ok fetch status.
-- **Large DBs:** `candidates generate` can create many clusters; tune `--evidence-limit`, `--min-score`, and promote only after review.
-- **Ollama:** `query`, `classify`, `extract`, `summarize`, `ask` need a running model (`ollama serve`).
+- **Web fetch:** Many sites return 403 or fail DNS; SERP rows may be stored with non-ok fetch status.
+- **Large DBs:** `candidates generate` can create many clusters — tune `--evidence-limit` and `--min-score`.
+- **Ollama:** `query`, `classify`, `extract`, `summarize`, and `ask` need a running model.
 
 ### Evaluation smoke
 
 ```bash
 ./scripts/smoke_eval.sh
-# optional LLM touch (needs Ollama):
-RUN_LLM=1 ./scripts/smoke_eval.sh
+RUN_LLM=1 ./scripts/smoke_eval.sh   # optional; needs Ollama
 ```
 
-## Command Reference
+---
 
-Use `investigate --help` for live help text. The CLI is **attack-focused**: evidence is filtered at ingest; `extract`/`classify`/`summarize` describe or triage **violence against civil facilities**, not generic facility background.
+## Command reference
+
+Run **`investigate --help`** for live help. The CLI is **attack-focused**: ingest uses facility attack relations; LLM commands target **violence against civil facilities**, not generic facility news.
 
 ### Top-level commands
 
-- `fetch` - ingest Telegram + web evidence for a target (attack-related rows only)
-- `list` - list stored evidence rows
-- `search` - substring search in evidence text/title (SQLite)
-- `semantic-search` - semantic search (Chroma)
-- `reindex` - rebuild Chroma index from SQLite
-- `summarize` - summarize selected evidence rows (Ollama)
-- `extract` - structured extraction into `classification_json` (Ollama)
-- `classify` - 9-flag war-crimes classifier into `classification_json.war_crimes_classifier` (Ollama)
-- `query` - local-first search + optional fetch fallback + summarize
-- `ask` - conservative ReAct assistant over stored evidence
-- `report` - report text for one incident
-- `status` - pipeline counts
-- `review`, `candidates`, `incidents`, `scrape` - grouped subcommands
+| Command | Purpose |
+|---------|---------|
+| `fetch` | Ingest Telegram + web for a target |
+| `list` | List stored evidence |
+| `search` | Substring search (SQLite) |
+| `semantic-search` | Semantic search (Chroma) |
+| `reindex` | Rebuild Chroma from SQLite |
+| `summarize` | Summarize evidence (Ollama) |
+| `extract` | Structured extraction → `classification_json` (Ollama) |
+| `classify` | War-crimes triage → `war_crimes_classifier` (Ollama) |
+| `query` | Local search + optional fetch + summarize |
+| `ask` | ReAct assistant over stored evidence |
+| `report` | Text report for one incident |
+| `status` | Pipeline counts |
+| `review`, `candidates`, `incidents`, `scrape` | Subcommand groups |
 
-### Common command forms
+### Common examples
 
 ```bash
 # Ingest
@@ -203,25 +275,23 @@ investigate search "emergency" --target "Shifa" --limit 30
 investigate semantic-search "hospital fuel generators" --target "مجمع" --limit 15
 investigate reindex --limit 2000
 
-# Review states
+# Review
 investigate review list --status pending --limit 50
 investigate review set --ids 58,60:75 --status approved
 investigate review queue --limit 30
 
-# Candidate clusters
+# Candidates & incidents
 investigate candidates generate --evidence-limit 200 --min-score 0.45
 investigate candidates list --status pending --limit 30
 investigate candidates approve --id 1
 investigate candidates reject --id 2 --note "different incident"
 investigate candidates merge --into 1 --from 3
 investigate candidates split --cluster 1 --evidence-id 42
-
-# Incidents and reports
 investigate incidents promote --cluster-id 1
 investigate incidents list --status reviewed --limit 30
 investigate report 1
 
-# LLM operations (Ollama required)
+# LLM (Ollama required)
 investigate summarize --target "مجمع الشفاء الطبي" --limit 8
 investigate summarize --ids 58,60:75
 investigate summarize --cluster-id 1
@@ -233,29 +303,31 @@ investigate query "hospital strike Gaza" --fetch-threshold 3 --auto-fetch-on-mis
 
 ### `--ids` format
 
-- Accepted in `review set`, `summarize`, `extract`, and `classify`.
-- Supports comma-separated ids and inclusive ranges.
-- Examples:
-  - `58,59,60`
-  - `50:110`
-  - `10,12:15,20`
+Used by `review set`, `summarize`, `extract`, and `classify`.
 
-## Data
+- Comma-separated ids and **inclusive ranges**.
+- Examples: `58,59,60` · `50:110` · `10,12:15,20`
 
-By default the database is `./data/investigation.db` (created automatically).
+---
 
-Main tables:
+## Data model
 
-- **`search_runs`** — one row per `investigate fetch` invocation (target, language, flags, **`web_date_filter`**).
-- **`search_results`** — one row per web SERP hit for that run (rank, URL, snippet, engine `ddgs`, language, **`serp_region`**, **`serp_pass`**, **`date_filter_applied`**, fetch status, optional error detail). Linked from **`evidence`** via `search_result_id` when a row was ingested from web.
-- **`sources`** — optional registered origins (e.g. web domain) for provenance.
-- **`evidence`** — stored items with `normalized_url` for deduplication, `content_hash`, and analyst **`review_status`**.
-- **`candidate_clusters`** / **`candidate_evidence_links`** — heuristic groupings for manual review (scores and textual **reasons** on each link).
-- **`incidents`** / **`incident_evidence`** — analyst-reviewed incident bundles promoted from approved clusters (or extended later for manual linking).
+Default database: **`./data/investigation.db`** (created automatically).
 
-**Smoke workflow:** `investigate fetch "..."` → `investigate extract --target "..." --limit 5` → `investigate candidates generate` → `investigate candidates approve --id N` → `investigate incidents promote --cluster-id N` → `investigate report <incident_id>`.
+| Table | Role |
+|-------|------|
+| **`search_runs`** | One row per `fetch` (target, language, flags, **`web_date_filter`**) |
+| **`search_results`** | One row per web SERP hit (rank, URL, snippet, **`serp_region`**, **`serp_pass`**, **`date_filter_applied`**, fetch status). Linked from **`evidence`** via `search_result_id` when ingested from web |
+| **`sources`** | Optional origins (e.g. web domain) |
+| **`evidence`** | Stored items; `normalized_url`, `content_hash`, **`review_status`** |
+| **`candidate_clusters`** / **`candidate_evidence_links`** | Heuristic groupings; scores and **reasons** on links |
+| **`incidents`** / **`incident_evidence`** | Promoted, reviewed incident bundles |
 
-Run tests (dev): `pip install -e ".[dev]"` then `pytest`.
+**Typical workflow:** `fetch` → `extract` (optional) → `candidates generate` → `candidates approve` → `incidents promote` → `report`.
+
+**Tests (dev):** `pip install -e ".[dev]"` then `pytest`.
+
+---
 
 ## License
 

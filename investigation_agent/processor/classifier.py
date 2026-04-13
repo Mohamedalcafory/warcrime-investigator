@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from investigation_agent.db.schema import Evidence
+from investigation_agent.processor.extractor import FACILITY_ATTACK_RELATIONS, parse_classification
 
 # Boolean flags from Telescraper classifier JSON schema
 WAR_CRIMES_BOOLEAN_KEYS: tuple[str, ...] = (
@@ -61,13 +62,39 @@ def normalize_war_crimes_classifier(data: dict[str, Any]) -> dict[str, Any]:
     if rat is not None:
         out["civil_facility_attack_rationale"] = str(rat).strip()
 
+    far = data.get("facility_attack_relation")
+    if far is not None:
+        s = str(far).strip().lower()
+        if s in FACILITY_ATTACK_RELATIONS:
+            out["facility_attack_relation"] = s
+            out["facility_attack_relation_confidence"] = _clamp_confidence(
+                data.get("facility_attack_relation_confidence", overall)
+            )
+        else:
+            out["facility_attack_relation"] = "unclear"
+            out["facility_attack_relation_confidence"] = 0.0
+    else:
+        out["facility_attack_relation"] = "unclear"
+        out["facility_attack_relation_confidence"] = 0.0
+
     return out
+
+
+def classifier_facility_attack_relation(evidence: Evidence) -> str | None:
+    """Relation label from merged war_crimes_classifier JSON, if any."""
+    data = parse_classification(evidence)
+    wc = data.get("war_crimes_classifier")
+    if not isinstance(wc, dict):
+        return None
+    v = wc.get("facility_attack_relation")
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    return s if s in FACILITY_ATTACK_RELATIONS else None
 
 
 def civil_facility_attack_relevance(evidence: Evidence) -> float:
     """Read normalized 0..1 score from merged war_crimes_classifier JSON, if any."""
-    from investigation_agent.processor.extractor import parse_classification
-
     data = parse_classification(evidence)
     wc = data.get("war_crimes_classifier")
     if not isinstance(wc, dict):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import Counter
 from typing import Annotated, Optional
 
 import typer
@@ -47,11 +48,11 @@ from investigation_agent.llm.prompts import (
     summarize_user_prompt,
 )
 from investigation_agent.processor.classifier import normalize_war_crimes_classifier
-from investigation_agent.processor.extractor import normalize_extraction_dict
+from investigation_agent.processor.extractor import facility_attack_relation, normalize_extraction_dict
 from investigation_agent.workflows.ingest import perform_fetch
 
 app = typer.Typer(
-    help="Attack-focused evidence: Telegram + web search, filtered to likely attacks on civil facilities"
+    help="Attack-focused evidence: Telegram + web search, relation-aware filter for attacks on civil facilities"
 )
 review_app = typer.Typer(help="Analyst review status for evidence rows")
 candidates_app = typer.Typer(help="Candidate evidence bundles (heuristic matching; analyst review)")
@@ -251,10 +252,19 @@ def cmd_semantic_search(
         typer.Option("--target", "-t", help="Only rows whose target_query contains this substring"),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max results")] = 15,
+    exclude_relation_negative: Annotated[
+        bool,
+        typer.Option(
+            "--exclude-relation-negative/--no-exclude-relation-negative",
+            help="Drop Chroma hits inferred as context-only or no attack on facility (default: on)",
+        ),
+    ] = True,
 ) -> None:
-    """Search stored evidence by meaning (ChromaDB embeddings)."""
-    n_fetch = min(limit * 5, 100) if target else limit
-    hits = chroma_semantic_search(query, limit=n_fetch)
+    """Search stored evidence by meaning (ChromaDB embeddings); optional relation-aware filtering."""
+    inner_limit = min(limit * 5, 100) if target else limit
+    hits = chroma_semantic_search(
+        query, limit=inner_limit, exclude_relation_negative=exclude_relation_negative
+    )
     Session = get_session_factory()
     session = Session()
     try:
@@ -266,7 +276,12 @@ def cmd_semantic_search(
             if target and target.lower() not in (r.target_query or "").lower():
                 continue
             dist = h.distance if h.distance is not None else 0.0
-            console.print(f"[bold]{h.evidence_id}[/bold] distance={dist:.4f} {r.source_type} {r.source_url}", markup=False)
+            rel = getattr(h, "facility_attack_relation", None) or "?"
+            console.print(
+                f"[bold]{h.evidence_id}[/bold] distance={dist:.4f} relation={rel} "
+                f"{r.source_type} {r.source_url}",
+                markup=False,
+            )
             preview = (r.raw_text or h.preview or "")[:320].replace("\n", " ")
             console.print(f"  {preview}…")
             shown += 1
@@ -708,7 +723,9 @@ def cmd_extract(
                 session.commit()
                 console.print(
                     f"[green]ok[/green] id={r.id} attack_occurred={data.get('attack_occurred')!r} "
-                    f"attack_type={data.get('attack_type')!r} facility_type={data.get('facility_type')!r}"
+                    f"attack_type={data.get('attack_type')!r} facility_type={data.get('facility_type')!r} "
+                    f"facility_attack_relation={data.get('facility_attack_relation')!r} "
+                    f"facility_target_object={data.get('facility_target_object')!r}"
                 )
             except OllamaChatError as e:
                 console.print(f"[red]id={r.id} Ollama:[/red] {e}")
@@ -777,7 +794,8 @@ def cmd_classify(
                 session.commit()
                 console.print(
                     f"[green]ok[/green] id={r.id} is_genocidal={normalized.get('is_genocidal')!r} "
-                    f"overall={normalized.get('overall_confidence')}"
+                    f"overall={normalized.get('overall_confidence')} "
+                    f"facility_attack_relation={normalized.get('facility_attack_relation')!r}"
                 )
             except OllamaChatError as e:
                 console.print(f"[red]id={r.id} Ollama:[/red] {e}")
@@ -824,7 +842,7 @@ def cmd_query(
     web: Annotated[bool, typer.Option("--web/--no-web")] = True,
     telegram: Annotated[bool, typer.Option("--telegram/--no-telegram")] = True,
 ) -> None:
-    """Local-first: semantic + substring search; optionally fetch, then summarize (Ollama)."""
+    """Local-first: semantic + substring search (relation-aware Chroma filter); optionally fetch, then summarize (Ollama)."""
     allowed_df = ("none", "week", "month", "year")
     wdf = web_date_filter.strip().lower()
     if wdf not in allowed_df:
@@ -883,8 +901,13 @@ def cmd_query(
         rows = get_evidence_by_ids(session, ids[: max(15, fetch_threshold)])
         n_inc = len(list_incidents(session, status=None, limit=50))
         n_cand = len(list_candidate_clusters(session, status="pending", limit=20))
+        rel_counts = Counter()
+        for r in rows[:12]:
+            rel = facility_attack_relation(r) or "unknown"
+            rel_counts[rel] += 1
         console.print(
-            f"[dim]local_evidence_used={len(rows)} incidents_in_db={n_inc} pending_clusters_shown_cap={n_cand} fetched={fetched}[/dim]"
+            f"[dim]local_evidence_used={len(rows)} incidents_in_db={n_inc} pending_clusters_shown_cap={n_cand} "
+            f"fetched={fetched} facility_attack_relation_counts={dict(rel_counts)}[/dim]"
         )
         ctx = build_evidence_context(rows[:12])
         try:
