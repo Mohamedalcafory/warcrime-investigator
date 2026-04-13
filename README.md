@@ -36,7 +36,22 @@ investigate list --target "Shifa"
 
 # Search within stored evidence text
 investigate search "emergency" --target "Shifa"
+
+# Semantic search (ChromaDB embeddings; new fetches index automatically)
+investigate reindex
+investigate semantic-search "hospital fuel generators" --target "مجمع" --limit 10
+
+# Analyst review (pending | approved | rejected)
+investigate review list --status pending
+investigate review set --ids 58,56 --status approved
+
+# Summarize only approved rows
+investigate summarize --target "مجمع" --limit 8 --approved-only
 ```
+
+ChromaDB files live under `./data/chroma` by default. Override with `CHROMA_PERSIST_DIR` in `config/.env`.
+
+**First run:** The default embedding model (~80MB ONNX) is downloaded once to your Chroma cache (e.g. `~/.cache/chroma/`). The first `reindex` or `semantic-search` after install may take a minute while that completes.
 
 ## Local LLM (Ollama)
 

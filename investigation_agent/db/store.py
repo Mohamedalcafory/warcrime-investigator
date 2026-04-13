@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from investigation_agent.db.schema import Evidence, SearchRun
+from investigation_agent.retrieval.chroma_store import index_evidence_safe
 
 
 def content_hash(text: str) -> str:
@@ -93,8 +94,18 @@ def insert_evidence(
         fetch_status=fetch_status,
         published_at=published_at,
         content_hash=h,
+        review_status="pending",
     )
     session.add(row)
+    session.flush()
+    index_evidence_safe(
+        row.id,
+        title=row.title,
+        raw_text=row.raw_text or "",
+        target_query=row.target_query,
+        source_type=row.source_type,
+        source_url=row.source_url,
+    )
     return row
 
 
@@ -144,20 +155,52 @@ def get_evidence_by_ids(session: Session, ids: list[int]) -> list[Evidence]:
     return [rows[i] for i in ids if i in rows]
 
 
+def list_evidence_by_review_status(
+    session: Session,
+    *,
+    status: str,
+    limit: int = 100,
+) -> list[Evidence]:
+    stmt = (
+        select(Evidence)
+        .where(Evidence.review_status == status)
+        .order_by(Evidence.created_at.desc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def set_review_status(session: Session, ids: list[int], status: str) -> int:
+    """Set review_status for evidence ids. Returns count updated."""
+    if status not in ("pending", "approved", "rejected"):
+        raise ValueError("status must be pending, approved, or rejected")
+    if not ids:
+        return 0
+    n = 0
+    for eid in ids:
+        row = session.get(Evidence, eid)
+        if row is not None:
+            row.review_status = status
+            n += 1
+    return n
+
+
 def get_evidence_by_target(
     session: Session,
     *,
     target_substring: str,
     limit: int = 50,
+    approved_only: bool = False,
+    exclude_rejected: bool = True,
 ) -> list[Evidence]:
     """Most recent evidence whose target_query matches substring."""
     like = f"%{target_substring}%"
-    stmt = (
-        select(Evidence)
-        .where(Evidence.target_query.ilike(like))
-        .order_by(Evidence.created_at.desc())
-        .limit(limit)
-    )
+    stmt = select(Evidence).where(Evidence.target_query.ilike(like))
+    if approved_only:
+        stmt = stmt.where(Evidence.review_status == "approved")
+    elif exclude_rejected:
+        stmt = stmt.where(Evidence.review_status != "rejected")
+    stmt = stmt.order_by(Evidence.created_at.desc()).limit(limit)
     return list(session.scalars(stmt).all())
 
 

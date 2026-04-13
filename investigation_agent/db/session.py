@@ -56,6 +56,9 @@ def _migrate_sqlite_columns(engine: Engine) -> None:
     if "classification_json" not in cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE evidence ADD COLUMN classification_json TEXT"))
+    if "review_status" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE evidence ADD COLUMN review_status TEXT DEFAULT 'pending'"))
 
 
 def get_session_factory() -> sessionmaker[Session]:

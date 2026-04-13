@@ -76,3 +76,11 @@ def ollama_timeout_seconds() -> float:
         return float(raw or "120")
     except ValueError:
         return 120.0
+
+
+def chroma_persist_path() -> Path:
+    """Directory for ChromaDB persistence (default: project data/chroma)."""
+    raw = _get("CHROMA_PERSIST_DIR")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return data_dir() / "chroma"

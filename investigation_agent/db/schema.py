@@ -69,4 +69,7 @@ class Evidence(Base):
     # JSON string: LLM extraction output (facility, location, etc.)
     classification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Analyst workflow: pending | approved | rejected
+    review_status: Mapped[str] = mapped_column(String(32), default="pending")
+
     search_run: Mapped["SearchRun | None"] = relationship(back_populates="evidence")
