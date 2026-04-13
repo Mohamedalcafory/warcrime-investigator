@@ -1,0 +1,9 @@
+.venv
+__pycache__/
+*.pyc
+.env
+*.session
+*.session-journal
+investigation_agent_session.session
+data/
+*.db
