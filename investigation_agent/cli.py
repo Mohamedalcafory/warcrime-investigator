@@ -320,14 +320,20 @@ def cmd_review_queue(
 
 @review_app.command("set")
 def cmd_review_set(
-    ids: Annotated[str, typer.Option("--ids", help="Comma-separated evidence ids")],
+    ids: Annotated[
+        str,
+        typer.Option(
+            "--ids",
+            help="Evidence ids: comma-separated and/or inclusive ranges, e.g. 58,60:75 or 50:110",
+        ),
+    ],
     status: Annotated[str, typer.Option("--status", help="pending | approved | rejected")],
 ) -> None:
     """Set review status for evidence rows."""
     if status not in ("pending", "approved", "rejected"):
         console.print("[red]status must be pending, approved, or rejected[/red]")
         raise typer.Exit(1)
-    id_list = _parse_id_list(ids)
+    id_list = _parse_id_list_cli(ids)
     if not id_list:
         console.print("[red]Provide --ids[/red]")
         raise typer.Exit(1)
@@ -481,15 +487,55 @@ def cmd_review_list(
 
 
 def _parse_id_list(ids_str: str | None) -> list[int]:
+    """
+    Parse evidence id lists from CLI ``--ids``.
+
+    Supports comma-separated ids and inclusive ranges ``start:end`` (``start <= end``).
+    Order is preserved; duplicates are dropped on first occurrence.
+    """
     if not ids_str or not ids_str.strip():
         return []
+    seen: set[int] = set()
     out: list[int] = []
     for part in ids_str.split(","):
         part = part.strip()
         if not part:
             continue
-        out.append(int(part))
+        if ":" in part:
+            pieces = part.split(":")
+            if len(pieces) != 2:
+                raise ValueError(f"invalid range token: {part!r}")
+            left, right = pieces[0].strip(), pieces[1].strip()
+            if not left or not right:
+                raise ValueError(f"invalid range token: {part!r}")
+            try:
+                start = int(left)
+                end = int(right)
+            except ValueError as e:
+                raise ValueError(f"invalid range token: {part!r}") from e
+            if start > end:
+                raise ValueError(f"invalid range token: {part!r}; start must be <= end")
+            for i in range(start, end + 1):
+                if i not in seen:
+                    seen.add(i)
+                    out.append(i)
+        else:
+            try:
+                i = int(part)
+            except ValueError as e:
+                raise ValueError(f"invalid id token: {part!r}") from e
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
     return out
+
+
+def _parse_id_list_cli(ids_str: str | None) -> list[int]:
+    try:
+        return _parse_id_list(ids_str)
+    except ValueError as e:
+        console.print(f"[red]Invalid --ids:[/red] {e}")
+        raise typer.Exit(1)
 
 
 @app.command("summarize")
@@ -500,7 +546,14 @@ def cmd_summarize(
     ] = None,
     ids: Annotated[
         str | None,
-        typer.Option("--ids", help="Comma-separated evidence ids, e.g. 58,55,56"),
+        typer.Option(
+            "--ids",
+            help="Evidence ids: comma-separated and/or inclusive ranges, e.g. 58,55 or 60:75",
+        ),
+    ] = None,
+    cluster_id: Annotated[
+        int | None,
+        typer.Option("--cluster-id", help="Summarize evidence linked to one candidate cluster"),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 8,
     approved_only: Annotated[
@@ -509,14 +562,25 @@ def cmd_summarize(
     ] = False,
 ) -> None:
     """Summarize stored evidence with citation tags and source list (local Ollama)."""
-    id_list = _parse_id_list(ids)
-    if not id_list and not target:
-        console.print("[red]Provide --target or --ids[/red]")
+    id_list = _parse_id_list_cli(ids) if ids else []
+    selectors = int(bool(id_list)) + int(bool(target)) + int(cluster_id is not None)
+    if selectors == 0:
+        console.print("[red]Provide one of --target, --ids, or --cluster-id[/red]")
+        raise typer.Exit(1)
+    if selectors > 1:
+        console.print("[red]Use only one of --target, --ids, or --cluster-id[/red]")
         raise typer.Exit(1)
 
     Session = get_session_factory()
     session = Session()
     try:
+        if cluster_id is not None:
+            cluster_ids = get_cluster_evidence_ids(session, cluster_id)
+            if not cluster_ids:
+                console.print(f"[yellow]No evidence linked to cluster {cluster_id}.[/yellow]")
+                raise typer.Exit(0)
+            id_list = cluster_ids
+
         if id_list:
             rows_all = get_evidence_by_ids(session, id_list)
             by_id = {r.id: r for r in rows_all}
@@ -593,12 +657,15 @@ def cmd_extract(
     ] = None,
     ids: Annotated[
         str | None,
-        typer.Option("--ids", help="Comma-separated evidence ids"),
+        typer.Option(
+            "--ids",
+            help="Evidence ids: comma-separated and/or inclusive ranges, e.g. 58,55 or 50:110",
+        ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 20,
 ) -> None:
     """Run LLM extraction per evidence row; store JSON in classification_json (local Ollama)."""
-    id_list = _parse_id_list(ids)
+    id_list = _parse_id_list_cli(ids) if ids else []
     if not id_list and not target:
         console.print("[red]Provide --target or --ids[/red]")
         raise typer.Exit(1)
@@ -656,12 +723,15 @@ def cmd_classify(
     ] = None,
     ids: Annotated[
         str | None,
-        typer.Option("--ids", help="Comma-separated evidence ids"),
+        typer.Option(
+            "--ids",
+            help="Evidence ids: comma-separated and/or inclusive ranges, e.g. 58,55 or 50:110",
+        ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 20,
 ) -> None:
     """Run 9-flag war-crimes classifier (Ollama); stored under classification_json.war_crimes_classifier."""
-    id_list = _parse_id_list(ids)
+    id_list = _parse_id_list_cli(ids) if ids else []
     if not id_list and not target:
         console.print("[red]Provide --target or --ids[/red]")
         raise typer.Exit(1)

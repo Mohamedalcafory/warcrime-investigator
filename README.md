@@ -47,6 +47,8 @@ investigate semantic-search "hospital fuel generators" --target "مجمع" --lim
 # Analyst review (pending | approved | rejected)
 investigate review list --status pending
 investigate review set --ids 58,56 --status approved
+# Inclusive ranges: same as listing every id from 50 through 110
+investigate review set --ids 50:110 --status approved
 
 # Summarize only approved rows
 investigate summarize --target "مجمع" --limit 8 --approved-only
@@ -112,6 +114,9 @@ Then:
 investigate summarize --target "مجمع الشفاء الطبي" --limit 8
 
 investigate summarize --ids 58,56
+investigate summarize --ids 60:75
+# Summarize one candidate cluster directly
+investigate summarize --cluster-id 1
 
 # Structured extraction per row (JSON merged into classification_json top-level keys)
 investigate extract --target "مجمع الشفاء الطبي" --limit 10
