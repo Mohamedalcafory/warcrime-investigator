@@ -1,0 +1,51 @@
+"""Database engine and session factory."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from investigation_agent.config import data_dir, database_url
+from investigation_agent.db.schema import Base
+
+_engine: Engine | None = None
+_session_factory: sessionmaker[Session] | None = None
+
+
+def get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        url = database_url()
+        if url.startswith("sqlite:///./") or url.startswith("sqlite:///../"):
+            data_dir()
+        connect_args = {}
+        if url.startswith("sqlite"):
+            connect_args["check_same_thread"] = False
+        _engine = create_engine(url, echo=False, connect_args=connect_args)
+    return _engine
+
+
+def init_db() -> None:
+    """Create tables if missing."""
+    url = database_url()
+    if "sqlite" in url:
+        path = url.replace("sqlite:///", "")
+        if path.startswith("./"):
+            db_path = Path.cwd() / path[2:]
+        elif not path.startswith("/"):
+            db_path = Path.cwd() / path
+        else:
+            db_path = Path(path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+
+
+def get_session_factory() -> sessionmaker[Session]:
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = sessionmaker(bind=get_engine(), autoflush=False, autocommit=False)
+    return _session_factory
