@@ -29,3 +29,26 @@ def location_guess(evidence: Evidence) -> str | None:
     data = parse_classification(evidence)
     v = data.get("location") or data.get("location_guess")
     return str(v).strip() if v is not None else None
+
+
+def normalize_extraction_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Stable keys and numeric confidence for storage and matching."""
+    keys = [
+        "facility_name",
+        "facility_type",
+        "location_text",
+        "date_text",
+        "casualties_text",
+        "confidence",
+    ]
+    out: dict[str, Any] = {}
+    for k in keys:
+        v = data.get(k)
+        if k == "confidence":
+            try:
+                out[k] = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                out[k] = 0.0
+        else:
+            out[k] = str(v).strip() if v is not None else ""
+    return out

@@ -17,6 +17,7 @@ from investigation_agent.db.session import get_session_factory, init_db
 from investigation_agent.db.schema import Evidence
 from investigation_agent.db.insert_types import InsertStatus
 from investigation_agent.processor.review_queue import generate_candidate_clusters
+from investigation_agent.agent import InvestigationTools, run_react
 from investigation_agent.db.store import (
     add_search_run,
     create_search_result,
@@ -28,7 +29,10 @@ from investigation_agent.db.store import (
     list_candidate_clusters,
     list_evidence,
     list_evidence_by_review_status,
+    list_incidents,
     merge_candidate_clusters,
+    pipeline_counts,
+    promote_candidate_cluster_to_incident,
     search_evidence_text,
     set_candidate_cluster_status,
     set_review_status,
@@ -45,14 +49,17 @@ from investigation_agent.llm.prompts import (
     extract_user_prompt,
     summarize_user_prompt,
 )
+from investigation_agent.processor.extractor import normalize_extraction_dict
 from investigation_agent.scraper.telegram import search_channels_for_target
 from investigation_agent.scraper.web import WebFetchOutcome, fetch_web_for_target
 
 app = typer.Typer(help="Target-driven evidence collection (Telegram search + web)")
 review_app = typer.Typer(help="Analyst review status for evidence rows")
 candidates_app = typer.Typer(help="Candidate evidence bundles (heuristic matching; analyst review)")
+incidents_app = typer.Typer(help="Reviewed incidents (promoted from candidates)")
 app.add_typer(review_app, name="review")
 app.add_typer(candidates_app, name="candidates")
+app.add_typer(incidents_app, name="incidents")
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -70,10 +77,23 @@ def cmd_fetch(
         int,
         typer.Option("--max-web", help="Max unique web URLs after bilingual SERP merge (AR+EN shared cap)"),
     ] = 15,
+    web_date_filter: Annotated[
+        str,
+        typer.Option(
+            "--web-date-filter",
+            help="ddgs timelimit: none | week | month | year",
+        ),
+    ] = "none",
     web: Annotated[bool, typer.Option("--web/--no-web", help="Include web search")] = True,
     telegram: Annotated[bool, typer.Option("--telegram/--no-telegram", help="Search Telegram channels")] = True,
 ) -> None:
     """Search Telegram (per-channel search) and the web for the target; store evidence in SQLite."""
+    allowed_df = ("none", "week", "month", "year")
+    wdf = web_date_filter.strip().lower()
+    if wdf not in allowed_df:
+        console.print(f"[red]--web-date-filter must be one of: {', '.join(allowed_df)}[/red]")
+        raise typer.Exit(1)
+
     Session = get_session_factory()
     session = Session()
     try:
@@ -84,6 +104,7 @@ def cmd_fetch(
             include_telegram=telegram,
             include_web=web,
             max_web_results=max_web,
+            web_date_filter=wdf,
         )
         session.commit()
         run_id = run.id
@@ -133,7 +154,10 @@ def cmd_fetch(
         if web:
             try:
                 outcome: WebFetchOutcome = fetch_web_for_target(
-                    query=target, max_results=max_web, lang=lang
+                    query=target,
+                    max_results=max_web,
+                    lang=lang,
+                    date_filter=wdf,
                 )
                 web_hits = outcome.hits
             except Exception as e:
@@ -161,6 +185,9 @@ def cmd_fetch(
                     language=lang,
                     fetch_status=wh.fetch_status,
                     fetch_error_detail=wh.fetch_error_detail,
+                    serp_region=wh.region_used,
+                    serp_pass=wh.serp_lang,
+                    date_filter_applied=wh.date_filter_applied,
                 )
                 src = get_or_create_web_source(session, result_url=wh.url)
                 sid = src.id if src else None
@@ -641,6 +668,7 @@ def cmd_extract(
                     temperature=0.1,
                 )
                 data = parse_json_object(llm_raw)
+                data = normalize_extraction_dict(data)
                 payload = json.dumps(data, ensure_ascii=False)
                 update_classification_json(session, r.id, payload)
                 session.commit()
@@ -658,6 +686,103 @@ def cmd_extract(
                 )
                 update_classification_json(session, r.id, err)
                 session.commit()
+    finally:
+        session.close()
+
+
+@incidents_app.command("list")
+def cmd_incidents_list(
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="candidate | reviewed | confirmed | rejected"),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 30,
+) -> None:
+    """List reviewed incidents."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        rows = list_incidents(session, status=status, limit=limit)
+        if not rows:
+            console.print("No incidents. Approve a candidate cluster then: [bold]investigate incidents promote --cluster-id ID[/bold]")
+            return
+        for r in rows:
+            console.print(
+                f"[bold]{r.id}[/bold] {r.status}  {r.title or ''}  cluster={r.source_cluster_id}",
+                markup=False,
+            )
+    finally:
+        session.close()
+
+
+@incidents_app.command("promote")
+def cmd_incidents_promote(
+    cluster_id: Annotated[int, typer.Option("--cluster-id", help="Must be an approved candidate cluster")],
+) -> None:
+    """Promote an approved candidate cluster to a reviewed incident (idempotent)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        try:
+            inc = promote_candidate_cluster_to_incident(session, cluster_id)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        if inc is None:
+            console.print("[red]Promotion failed: cluster missing, not approved, or no evidence links.[/red]")
+            raise typer.Exit(1)
+        session.commit()
+        console.print(f"[green]Incident[/green] id={inc.id}  title={inc.title!r}")
+    finally:
+        session.close()
+
+
+@app.command("ask")
+def cmd_ask(
+    question: Annotated[str, typer.Argument(help="Question; uses tools + local Ollama")],
+) -> None:
+    """Conservative assistant over stored evidence (tools + ReAct)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        tools = InvestigationTools(session)
+        out = run_react(tools, question)
+        console.print(out, markup=False)
+    finally:
+        session.close()
+
+
+@app.command("report")
+def cmd_report(
+    incident_id: Annotated[int, typer.Argument(help="Incident id from investigate incidents list")],
+) -> None:
+    """Print a conservative text report for one incident (linked evidence previews)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        tools = InvestigationTools(session)
+        raw = tools.tool_generate_report(incident_id)
+        data = json.loads(raw)
+        if "error" in data:
+            console.print(f"[red]{data['error']}[/red]")
+            raise typer.Exit(1)
+        console.print(data.get("report", ""), markup=False)
+    finally:
+        session.close()
+
+
+@app.command("status")
+def cmd_status() -> None:
+    """Show rough pipeline counts (evidence, runs, clusters, incidents)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        c = pipeline_counts(session)
+        console.print(
+            f"evidence_rows={c['evidence_rows']}  search_runs={c['search_runs']}  "
+            f"candidate_clusters={c['candidate_clusters']}  incidents={c['incidents']}  "
+            f"evidence_pending_review={c['evidence_pending_review']}"
+        )
     finally:
         session.close()
 

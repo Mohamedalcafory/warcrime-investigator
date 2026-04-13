@@ -16,6 +16,18 @@ from investigation_agent.util.urlnorm import normalize_url
 logger = logging.getLogger(__name__)
 
 
+def _date_filter_to_timelimit(date_filter: str) -> str | None:
+    """Map CLI date filter to ddgs ``timelimit`` (d/w/m/y) or None."""
+    df = (date_filter or "none").strip().lower()
+    mapping = {
+        "none": None,
+        "week": "w",
+        "month": "m",
+        "year": "y",
+    }
+    return mapping.get(df, None)
+
+
 @dataclass
 class WebHit:
     rank: int
@@ -29,6 +41,10 @@ class WebHit:
     normalized_url: str = field(default="")
     """Which SERP pass produced this row after merge (ar | en)."""
     serp_lang: str | None = None
+    """ddgs ``region`` that produced this hit (e.g. wt-wt, us-en)."""
+    region_used: str | None = None
+    """CLI date filter label (none|week|month|year) passed to ddgs timelimit."""
+    date_filter_applied: str | None = None
 
 
 @dataclass
@@ -63,20 +79,30 @@ def _ddgs_text_serp(
     query: str,
     max_results: int,
     regions: list[str],
+    timelimit: str | None = None,
 ) -> list[dict]:
     """
     Run ddgs.text with region fallbacks. Returns raw SERP dicts (may be empty).
+    Each dict may include ``_serp_region`` for provenance.
     On 'no results', ddgs raises DDGSException — we catch and try the next region.
     """
     last_err: Exception | None = None
     with DDGS(timeout=20) as ddgs:
         for region in regions:
             try:
-                results = ddgs.text(query, region=region, max_results=max_results)
+                kwargs: dict = {"region": region, "max_results": max_results}
+                if timelimit is not None:
+                    kwargs["timelimit"] = timelimit
+                results = ddgs.text(query, **kwargs)
                 n = len(results) if results else 0
-                logger.info("ddgs.text raw SERP count=%d region=%s", n, region)
+                logger.info("ddgs.text raw SERP count=%d region=%s timelimit=%s", n, region, timelimit)
                 if results:
-                    return list(results)
+                    out: list[dict] = []
+                    for r in results:
+                        d = dict(r)
+                        d["_serp_region"] = region
+                        out.append(d)
+                    return out
             except (DDGSException, TimeoutException) as e:
                 last_err = e
                 logger.info("ddgs.text no usable results region=%s: %s", region, e)
@@ -116,7 +142,7 @@ def _merge_serp_ar_en(
     return merged
 
 
-def _items_to_hits(merged: list[tuple[dict, str]]) -> list[WebHit]:
+def _items_to_hits(merged: list[tuple[dict, str]], *, date_filter_label: str) -> list[WebHit]:
     hits: list[WebHit] = []
     for i, (item, serp_lang) in enumerate(merged, start=1):
         url = (item.get("href") or item.get("url") or "").strip()
@@ -124,6 +150,8 @@ def _items_to_hits(merged: list[tuple[dict, str]]) -> list[WebHit]:
         snippet = (item.get("body") or item.get("snippet") or "").strip()
         if not url:
             continue
+
+        region_used = (item.get("_serp_region") or "").strip() or None
 
         norm = normalize_url(url)
         raw_text = ""
@@ -194,6 +222,8 @@ def _items_to_hits(merged: list[tuple[dict, str]]) -> list[WebHit]:
                 fetch_error_detail=err_detail,
                 normalized_url=norm,
                 serp_lang=serp_lang,
+                region_used=region_used,
+                date_filter_applied=date_filter_label,
             )
         )
 
@@ -205,6 +235,7 @@ def fetch_web_for_target(
     query: str,
     max_results: int = 20,
     lang: str = "en",
+    date_filter: str = "none",
 ) -> WebFetchOutcome:
     """
     Search via ddgs metasearch (always Arabic + English SERP passes), merge with
@@ -214,12 +245,13 @@ def fetch_web_for_target(
     is always bilingual AR+EN.
     """
     _ = lang
+    tl = _date_filter_to_timelimit(date_filter)
     ar_regions = _regions_for_lang("ar")
     en_regions = _regions_for_lang("en")
-    ar_raw = _ddgs_text_serp(query, max_results=max_results, regions=ar_regions)
-    en_raw = _ddgs_text_serp(query, max_results=max_results, regions=en_regions)
+    ar_raw = _ddgs_text_serp(query, max_results=max_results, regions=ar_regions, timelimit=tl)
+    en_raw = _ddgs_text_serp(query, max_results=max_results, regions=en_regions, timelimit=tl)
     merged = _merge_serp_ar_en(ar_raw, en_raw, max_results=max_results)
-    hits = _items_to_hits(merged)
+    hits = _items_to_hits(merged, date_filter_label=date_filter.strip().lower() or "none")
     return WebFetchOutcome(
         hits=hits,
         raw_serp_ar=len(ar_raw),

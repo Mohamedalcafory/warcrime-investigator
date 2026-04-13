@@ -10,6 +10,11 @@ from investigation_agent.db.schema import Evidence
 from investigation_agent.processor.extractor import facility_type, location_guess
 
 
+def normalize_reason_labels(reasons: list[str]) -> list[str]:
+    """Deterministic ordering for reproducible audit trails."""
+    return sorted(set(reasons))
+
+
 def _same_calendar_day(a: datetime | None, b: datetime | None) -> bool:
     if a is None or b is None:
         return False

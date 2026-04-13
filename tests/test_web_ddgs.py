@@ -7,10 +7,18 @@ from unittest.mock import patch
 from ddgs.exceptions import DDGSException
 
 from investigation_agent.scraper.web import (
+    _date_filter_to_timelimit,
     _ddgs_text_serp,
     _merge_serp_ar_en,
     fetch_web_for_target,
 )
+
+
+def test_date_filter_to_timelimit():
+    assert _date_filter_to_timelimit("none") is None
+    assert _date_filter_to_timelimit("week") == "w"
+    assert _date_filter_to_timelimit("month") == "m"
+    assert _date_filter_to_timelimit("year") == "y"
 
 
 def test_ddgs_text_serp_fallback_regions():

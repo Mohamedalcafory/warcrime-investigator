@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from investigation_agent.db.insert_types import InsertStatus
@@ -13,6 +14,8 @@ from investigation_agent.db.schema import (
     CandidateCluster,
     CandidateEvidenceLink,
     Evidence,
+    Incident,
+    IncidentEvidence,
     SearchResult,
     SearchRun,
     Source,
@@ -33,6 +36,7 @@ def add_search_run(
     include_telegram: bool,
     include_web: bool,
     max_web_results: int,
+    web_date_filter: str = "none",
 ) -> SearchRun:
     run = SearchRun(
         target_query=target_query,
@@ -41,6 +45,7 @@ def add_search_run(
         include_web=include_web,
         max_web_results=max_web_results,
         web_engine="ddgs",
+        web_date_filter=web_date_filter,
     )
     session.add(run)
     session.flush()
@@ -154,6 +159,9 @@ def create_search_result(
     language: str,
     fetch_status: str,
     fetch_error_detail: str | None = None,
+    serp_region: str | None = None,
+    serp_pass: str | None = None,
+    date_filter_applied: str | None = None,
 ) -> SearchResult:
     nu = normalize_url(result_url)
     sr = SearchResult(
@@ -167,6 +175,9 @@ def create_search_result(
         language=language,
         fetch_status=fetch_status,
         fetch_error_detail=fetch_error_detail,
+        serp_region=serp_region,
+        serp_pass=serp_pass,
+        date_filter_applied=date_filter_applied,
     )
     session.add(sr)
     session.flush()
@@ -364,6 +375,97 @@ def merge_candidate_clusters(session: Session, keep_id: int, merge_id: int) -> b
         existing.add(link.evidence_id)
     session.delete(merge)
     return True
+
+
+def list_incidents(
+    session: Session,
+    *,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[Incident]:
+    stmt = select(Incident).order_by(Incident.id.desc()).limit(limit)
+    if status:
+        stmt = stmt.where(Incident.status == status)
+    return list(session.scalars(stmt).all())
+
+
+def get_incident(session: Session, incident_id: int) -> Incident | None:
+    return session.get(Incident, incident_id)
+
+
+def get_incident_evidence_ids(session: Session, incident_id: int) -> list[int]:
+    q = select(IncidentEvidence.evidence_id).where(IncidentEvidence.incident_id == incident_id)
+    return list(session.scalars(q).all())
+
+
+def promote_candidate_cluster_to_incident(session: Session, cluster_id: int) -> Incident | None:
+    """
+    Create an Incident from an approved candidate cluster (idempotent).
+    Requires cluster status approved and at least one evidence link.
+    """
+    cluster = session.get(CandidateCluster, cluster_id)
+    if cluster is None:
+        return None
+    if cluster.status != "approved":
+        raise ValueError("cluster must have status 'approved' before promotion")
+    existing = session.scalar(select(Incident).where(Incident.source_cluster_id == cluster_id))
+    if existing:
+        return existing
+    links = list(
+        session.scalars(
+            select(CandidateEvidenceLink).where(CandidateEvidenceLink.cluster_id == cluster_id)
+        ).all()
+    )
+    if not links:
+        return None
+    title = cluster.title
+    if not title:
+        ev0 = session.get(Evidence, links[0].evidence_id)
+        title = ((ev0.target_query[:200] if ev0 else None) or f"Incident from cluster {cluster_id}")
+    inc = Incident(
+        title=title,
+        status="reviewed",
+        source_cluster_id=cluster_id,
+        reviewer_note=cluster.reviewer_note,
+    )
+    session.add(inc)
+    session.flush()
+    for link in links:
+        try:
+            reasons = json.loads(link.reasons_json or "[]")
+        except json.JSONDecodeError:
+            reasons = [link.reasons_json or ""]
+        if not isinstance(reasons, list):
+            reasons = [str(reasons)]
+        reason_str = json.dumps(reasons, ensure_ascii=False)
+        session.add(
+            IncidentEvidence(
+                incident_id=inc.id,
+                evidence_id=link.evidence_id,
+                link_reason=reason_str,
+                confidence_score=link.confidence,
+                link_source="candidate_promotion",
+            )
+        )
+    return inc
+
+
+def pipeline_counts(session: Session) -> dict[str, int]:
+    """Rough stats for `investigate status`."""
+    n_evidence = session.scalar(select(func.count()).select_from(Evidence)) or 0
+    n_runs = session.scalar(select(func.count()).select_from(SearchRun)) or 0
+    n_clusters = session.scalar(select(func.count()).select_from(CandidateCluster)) or 0
+    n_incidents = session.scalar(select(func.count()).select_from(Incident)) or 0
+    n_pending = session.scalar(
+        select(func.count()).select_from(Evidence).where(Evidence.review_status == "pending")
+    ) or 0
+    return {
+        "evidence_rows": int(n_evidence),
+        "search_runs": int(n_runs),
+        "candidate_clusters": int(n_clusters),
+        "incidents": int(n_incidents),
+        "evidence_pending_review": int(n_pending),
+    }
 
 
 def split_evidence_to_new_cluster(

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from investigation_agent.db.schema import CandidateCluster, CandidateEvidenceLink, Evidence
-from investigation_agent.processor.matcher import pair_score
+from investigation_agent.processor.matcher import normalize_reason_labels, pair_score
 
 
 def generate_candidate_clusters(
@@ -48,8 +48,9 @@ def generate_candidate_clusters(
             session.add(cluster)
             session.flush()
             for eid, other in ((eid_a, eid_b), (eid_b, eid_a)):
+                sig = normalize_reason_labels(reasons)
                 rjson = json.dumps(
-                    reasons + [f"pair_score:{score:.3f}", f"paired_with:{other}"],
+                    sig + [f"pair_score:{score:.3f}", f"paired_with:{other}"],
                     ensure_ascii=False,
                 )
                 session.add(

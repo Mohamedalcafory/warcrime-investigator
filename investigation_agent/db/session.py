@@ -90,6 +90,24 @@ def _migrate_sqlite_columns(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_evidence_normalized_url ON evidence (normalized_url)"))
 
+    if insp.has_table("search_runs"):
+        sr_cols = {c["name"] for c in inspect(engine).get_columns("search_runs")}
+        if "web_date_filter" not in sr_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE search_runs ADD COLUMN web_date_filter VARCHAR(32) DEFAULT 'none'"))
+
+    if insp.has_table("search_results"):
+        res_cols = {c["name"] for c in inspect(engine).get_columns("search_results")}
+        if "serp_region" not in res_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE search_results ADD COLUMN serp_region VARCHAR(64)"))
+        if "serp_pass" not in res_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE search_results ADD COLUMN serp_pass VARCHAR(8)"))
+        if "date_filter_applied" not in res_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE search_results ADD COLUMN date_filter_applied VARCHAR(32)"))
+
 
 def get_session_factory() -> sessionmaker[Session]:
     global _session_factory

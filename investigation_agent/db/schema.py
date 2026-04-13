@@ -44,6 +44,7 @@ class SearchRun(Base):
     include_web: Mapped[bool] = mapped_column(default=True)
     max_web_results: Mapped[int] = mapped_column(Integer, default=20)
     web_engine: Mapped[str] = mapped_column(String(64), default="ddgs")
+    web_date_filter: Mapped[str] = mapped_column(String(32), default="none")  # none | week | month | year
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     evidence: Mapped[list["Evidence"]] = relationship(back_populates="search_run")
@@ -72,6 +73,9 @@ class SearchResult(Base):
     language: Mapped[str] = mapped_column(String(32), default="en")
     fetch_status: Mapped[str] = mapped_column(String(64), default="pending")
     fetch_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    serp_region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    serp_pass: Mapped[str | None] = mapped_column(String(8), nullable=True)  # ar | en
+    date_filter_applied: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     search_run: Mapped["SearchRun"] = relationship(back_populates="search_results")
     linked_evidence: Mapped[list["Evidence"]] = relationship(
@@ -136,6 +140,10 @@ class Evidence(Base):
     candidate_links: Mapped[list["CandidateEvidenceLink"]] = relationship(
         back_populates="evidence",
     )
+    incident_links: Mapped[list["IncidentEvidence"]] = relationship(
+        back_populates="evidence",
+        foreign_keys="IncidentEvidence.evidence_id",
+    )
 
 
 class CandidateCluster(Base):
@@ -153,6 +161,68 @@ class CandidateCluster(Base):
 
     links: Mapped[list["CandidateEvidenceLink"]] = relationship(
         back_populates="cluster", cascade="all, delete-orphan"
+    )
+
+
+class Incident(Base):
+    """Analyst-reviewed incident bundle (promoted from candidates or created manually)."""
+
+    __tablename__ = "incidents"
+    __table_args__ = (
+        Index("ix_incidents_status", "status"),
+        Index("ix_incidents_source_cluster", "source_cluster_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default="candidate"
+    )  # candidate | reviewed | confirmed | rejected
+    location_text: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    facility_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    incident_date_guess: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    lat_lon: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewer_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_cluster_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("candidate_clusters.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    source_cluster: Mapped["CandidateCluster | None"] = relationship(
+        foreign_keys=[source_cluster_id],
+    )
+    evidence_links: Mapped[list["IncidentEvidence"]] = relationship(
+        back_populates="incident", cascade="all, delete-orphan"
+    )
+
+
+class IncidentEvidence(Base):
+    """Link incident to evidence with audit trail."""
+
+    __tablename__ = "incident_evidence"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "evidence_id", name="uq_incident_evidence"),
+        Index("ix_incident_evidence_evidence", "evidence_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("evidence.id", ondelete="CASCADE"), nullable=False
+    )
+    link_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reviewer_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    link_source: Mapped[str] = mapped_column(String(64), default="manual")  # candidate_promotion | manual
+
+    incident: Mapped["Incident"] = relationship(back_populates="evidence_links")
+    evidence: Mapped["Evidence"] = relationship(
+        back_populates="incident_links",
+        foreign_keys="IncidentEvidence.evidence_id",
     )
 
 
