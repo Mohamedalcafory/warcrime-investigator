@@ -168,6 +168,76 @@ Extraction and classification are analyst aids only — verify against sources.
 RUN_LLM=1 ./scripts/smoke_eval.sh
 ```
 
+## Command Reference
+
+Use `investigate --help` for live help text.
+
+### Top-level commands
+
+- `fetch` - ingest Telegram + web evidence for a target
+- `list` - list stored evidence rows
+- `search` - substring search in evidence text/title (SQLite)
+- `semantic-search` - semantic search (Chroma)
+- `reindex` - rebuild Chroma index from SQLite
+- `summarize` - summarize selected evidence rows (Ollama)
+- `extract` - structured extraction into `classification_json` (Ollama)
+- `classify` - 9-flag war-crimes classifier into `classification_json.war_crimes_classifier` (Ollama)
+- `query` - local-first search + optional fetch fallback + summarize
+- `ask` - conservative ReAct assistant over stored evidence
+- `report` - report text for one incident
+- `status` - pipeline counts
+- `review`, `candidates`, `incidents`, `scrape` - grouped subcommands
+
+### Common command forms
+
+```bash
+# Ingest
+investigate fetch "Al Shifa Hospital" --max-web 15 --web-date-filter month
+investigate scrape telegram "Al Shifa Hospital" --channel mychannel
+
+# Retrieval
+investigate list --target "Shifa" --limit 50
+investigate search "emergency" --target "Shifa" --limit 30
+investigate semantic-search "hospital fuel generators" --target "مجمع" --limit 15
+investigate reindex --limit 2000
+
+# Review states
+investigate review list --status pending --limit 50
+investigate review set --ids 58,60:75 --status approved
+investigate review queue --limit 30
+
+# Candidate clusters
+investigate candidates generate --evidence-limit 200 --min-score 0.45
+investigate candidates list --status pending --limit 30
+investigate candidates approve --id 1
+investigate candidates reject --id 2 --note "different incident"
+investigate candidates merge --into 1 --from 3
+investigate candidates split --cluster 1 --evidence-id 42
+
+# Incidents and reports
+investigate incidents promote --cluster-id 1
+investigate incidents list --status reviewed --limit 30
+investigate report 1
+
+# LLM operations (Ollama required)
+investigate summarize --target "مجمع الشفاء الطبي" --limit 8
+investigate summarize --ids 58,60:75
+investigate summarize --cluster-id 1
+investigate extract --ids 58,60:75
+investigate classify --ids 58,60:75
+investigate ask "What evidence mentions schools in Rafah?"
+investigate query "hospital strike Gaza" --fetch-threshold 3 --auto-fetch-on-miss
+```
+
+### `--ids` format
+
+- Accepted in `review set`, `summarize`, `extract`, and `classify`.
+- Supports comma-separated ids and inclusive ranges.
+- Examples:
+  - `58,59,60`
+  - `50:110`
+  - `10,12:15,20`
+
 ## Data
 
 By default the database is `./data/investigation.db` (created automatically).
