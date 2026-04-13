@@ -40,7 +40,7 @@ def add_search_run(
         include_telegram=include_telegram,
         include_web=include_web,
         max_web_results=max_web_results,
-        web_engine="duckduckgo",
+        web_engine="ddgs",
     )
     session.add(run)
     session.flush()

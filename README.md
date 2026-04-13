@@ -3,7 +3,7 @@
 Collect evidence for a **named target** (e.g. a hospital or school) by:
 
 - Searching configured **Telegram channels** for messages matching the target (not full-channel dumps).
-- Running a **keyword web search** and extracting article text.
+- Running a **bilingual (Arabic + English) keyword web search** and extracting article text.
 
 Everything is stored in **SQLite** with source URLs for manual review.
 
@@ -49,7 +49,7 @@ investigate review set --ids 58,56 --status approved
 investigate summarize --target "مجمع" --limit 8 --approved-only
 ```
 
-`investigate fetch` prints ingestion stats: Telegram inserted vs deduped, web inserted vs URL/body-hash dedupes, and counts of inserted rows whose fetch status was not `ok`.
+`investigate fetch` prints ingestion stats: Telegram inserted vs deduped, **`web_serp=N`** (total unique URLs after bilingual SERP merge and before fetch), **`web_serp_ar`** / **`web_serp_en`** (how many of those URLs came from the Arabic vs English SERP pass; same URL in both counts once, Arabic wins), web inserted vs URL/body-hash dedupes, and counts of inserted rows whose fetch status was not `ok`. **`--max-web`** is a **shared cap** across Arabic + English (merged list, deduped by normalized URL). Web search uses the **[`ddgs`](https://pypi.org/project/ddgs/)** package (DuckDuckGo-style text search). If **`web_serp=0`**, the CLI prints a yellow hint: empty SERP, blocking, or network issues — try again, increase `--max-web`, set **`DDGS_PROXY`** if you need a proxy, or use **`--no-web`** to skip web.
 
 ### Candidate clusters (heuristic matching)
 
@@ -105,7 +105,7 @@ By default the database is `./data/investigation.db` (created automatically).
 Main tables:
 
 - **`search_runs`** — one row per `investigate fetch` invocation (target, language, flags).
-- **`search_results`** — one row per DuckDuckGo result for that run (rank, URL, snippet, engine, language, fetch status, optional error detail). Linked from **`evidence`** via `search_result_id` when a row was ingested from web.
+- **`search_results`** — one row per web SERP hit for that run (rank, URL, snippet, engine `ddgs`, language, fetch status, optional error detail). Linked from **`evidence`** via `search_result_id` when a row was ingested from web.
 - **`sources`** — optional registered origins (e.g. web domain) for provenance.
 - **`evidence`** — stored items with `normalized_url` for deduplication, `content_hash`, and analyst **`review_status`**.
 - **`candidate_clusters`** / **`candidate_evidence_links`** — heuristic groupings for manual review (scores and textual **reasons** on each link).

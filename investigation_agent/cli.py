@@ -46,7 +46,7 @@ from investigation_agent.llm.prompts import (
     summarize_user_prompt,
 )
 from investigation_agent.scraper.telegram import search_channels_for_target
-from investigation_agent.scraper.web import fetch_web_for_target
+from investigation_agent.scraper.web import WebFetchOutcome, fetch_web_for_target
 
 app = typer.Typer(help="Target-driven evidence collection (Telegram search + web)")
 review_app = typer.Typer(help="Analyst review status for evidence rows")
@@ -66,7 +66,10 @@ def main() -> None:
 def cmd_fetch(
     target: Annotated[str, typer.Argument(help="Hospital, school, or other target to search for")],
     lang: Annotated[str, typer.Option("--lang", "-l", help="Hint for web search: en or ar")] = "en",
-    max_web: Annotated[int, typer.Option("--max-web", help="Max DuckDuckGo results to process")] = 15,
+    max_web: Annotated[
+        int,
+        typer.Option("--max-web", help="Max unique web URLs after bilingual SERP merge (AR+EN shared cap)"),
+    ] = 15,
     web: Annotated[bool, typer.Option("--web/--no-web", help="Include web search")] = True,
     telegram: Annotated[bool, typer.Option("--telegram/--no-telegram", help="Search Telegram channels")] = True,
 ) -> None:
@@ -90,6 +93,9 @@ def cmd_fetch(
         dup_web_url = 0
         dup_web_hash = 0
         web_failed_status: dict[str, int] = {}
+        web_serp = 0
+        web_serp_ar = 0
+        web_serp_en = 0
 
         if telegram:
             channels = telegram_channels()
@@ -126,10 +132,23 @@ def cmd_fetch(
 
         if web:
             try:
-                web_hits = fetch_web_for_target(query=target, max_results=max_web, lang=lang)
+                outcome: WebFetchOutcome = fetch_web_for_target(
+                    query=target, max_results=max_web, lang=lang
+                )
+                web_hits = outcome.hits
             except Exception as e:
                 console.print(f"[red]Web search failed:[/red] {e}")
                 web_hits = []
+                outcome = WebFetchOutcome(hits=[], raw_serp_ar=0, raw_serp_en=0)
+            web_serp = outcome.web_serp
+            web_serp_ar = outcome.web_serp_ar
+            web_serp_en = outcome.web_serp_en
+            if web_serp == 0:
+                console.print(
+                    "[yellow]web_serp=0[/yellow]: no result rows after "
+                    "bilingual ddgs search + URL extraction. Try --max-web, check network, "
+                    "or use --no-web if Telegram is enough."
+                )
             for wh in web_hits:
                 sr = create_search_result(
                     session,
@@ -138,7 +157,7 @@ def cmd_fetch(
                     result_url=wh.url,
                     result_title=wh.title or None,
                     result_snippet=wh.snippet or None,
-                    engine="duckduckgo",
+                    engine="ddgs",
                     language=lang,
                     fetch_status=wh.fetch_status,
                     fetch_error_detail=wh.fetch_error_detail,
@@ -171,10 +190,16 @@ def cmd_fetch(
                     dup_web_hash += 1
             session.commit()
 
+        web_line = (
+            f"  web: web_serp={web_serp if web else 0} "
+            f"web_serp_ar={web_serp_ar if web else 0} "
+            f"web_serp_en={web_serp_en if web else 0} "
+            f"inserted={added_web} dedup_url={dup_web_url} dedup_body={dup_web_hash}"
+        )
         console.print(
             f"[green]Done[/green] run_id={run_id} target={target!r}\n"
             f"  telegram: inserted={added_tg} deduped={dup_tg}\n"
-            f"  web: inserted={added_web} dedup_url={dup_web_url} dedup_body={dup_web_hash}"
+            f"{web_line}"
         )
         if web_failed_status:
             parts = [f"{k}={v}" for k, v in sorted(web_failed_status.items())]

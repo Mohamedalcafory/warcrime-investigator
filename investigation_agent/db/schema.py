@@ -43,7 +43,7 @@ class SearchRun(Base):
     include_telegram: Mapped[bool] = mapped_column(default=True)
     include_web: Mapped[bool] = mapped_column(default=True)
     max_web_results: Mapped[int] = mapped_column(Integer, default=20)
-    web_engine: Mapped[str] = mapped_column(String(64), default="duckduckgo")
+    web_engine: Mapped[str] = mapped_column(String(64), default="ddgs")
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     evidence: Mapped[list["Evidence"]] = relationship(back_populates="search_run")
@@ -68,7 +68,7 @@ class SearchResult(Base):
     normalized_url: Mapped[str] = mapped_column(String(4096), nullable=False)
     result_title: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     result_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
-    engine: Mapped[str] = mapped_column(String(64), default="duckduckgo")
+    engine: Mapped[str] = mapped_column(String(64), default="ddgs")
     language: Mapped[str] = mapped_column(String(32), default="en")
     fetch_status: Mapped[str] = mapped_column(String(64), default="pending")
     fetch_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
