@@ -13,6 +13,7 @@ from investigation_agent.db.store import (
     get_or_create_web_source,
     insert_evidence,
 )
+from investigation_agent.processor.attack_filter import passes_attack_on_civil_facility_filter
 from investigation_agent.scraper.telegram import search_channels_for_target
 from investigation_agent.scraper.web import WebFetchOutcome, fetch_web_for_target
 
@@ -58,9 +59,11 @@ def perform_fetch(
     run_id = run.id
     added_tg = 0
     dup_tg = 0
+    filtered_tg_non_attack = 0
     added_web = 0
     dup_web_url = 0
     dup_web_hash = 0
+    filtered_web_non_attack = 0
     web_failed_status: dict[str, int] = {}
     web_serp = 0
     web_serp_ar = 0
@@ -79,6 +82,12 @@ def perform_fetch(
             logger.warning("Telegram skipped: %s", e)
             hits = []
         for h in hits:
+            if not passes_attack_on_civil_facility_filter(
+                target_query=target,
+                body=h.text,
+            ):
+                filtered_tg_non_attack += 1
+                continue
             row, st = insert_evidence(
                 session,
                 search_run_id=run_id,
@@ -116,6 +125,14 @@ def perform_fetch(
         web_serp_ar = outcome.web_serp_ar
         web_serp_en = outcome.web_serp_en
         for wh in web_hits:
+            if not passes_attack_on_civil_facility_filter(
+                target_query=target,
+                title=wh.title,
+                snippet=wh.snippet,
+                body=wh.raw_text,
+            ):
+                filtered_web_non_attack += 1
+                continue
             sr = create_search_result(
                 session,
                 search_run_id=run_id,
@@ -163,9 +180,11 @@ def perform_fetch(
         "run_id": run_id,
         "added_tg": added_tg,
         "dup_tg": dup_tg,
+        "filtered_tg_non_attack": filtered_tg_non_attack,
         "added_web": added_web,
         "dup_web_url": dup_web_url,
         "dup_web_hash": dup_web_hash,
+        "filtered_web_non_attack": filtered_web_non_attack,
         "web_failed_status": web_failed_status,
         "web_serp": web_serp,
         "web_serp_ar": web_serp_ar,

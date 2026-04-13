@@ -50,7 +50,9 @@ from investigation_agent.processor.classifier import normalize_war_crimes_classi
 from investigation_agent.processor.extractor import normalize_extraction_dict
 from investigation_agent.workflows.ingest import perform_fetch
 
-app = typer.Typer(help="Target-driven evidence collection (Telegram search + web)")
+app = typer.Typer(
+    help="Attack-focused evidence: Telegram + web search, filtered to likely attacks on civil facilities"
+)
 review_app = typer.Typer(help="Analyst review status for evidence rows")
 candidates_app = typer.Typer(help="Candidate evidence bundles (heuristic matching; analyst review)")
 incidents_app = typer.Typer(help="Reviewed incidents (promoted from candidates)")
@@ -70,7 +72,10 @@ def main() -> None:
 
 @app.command("fetch")
 def cmd_fetch(
-    target: Annotated[str, typer.Argument(help="Hospital, school, or other target to search for")],
+    target: Annotated[
+        str,
+        typer.Argument(help="Facility or place name; results are filtered to likely attack-related content"),
+    ],
     lang: Annotated[str, typer.Option("--lang", "-l", help="Hint for web search: en or ar")] = "en",
     max_web: Annotated[
         int,
@@ -86,7 +91,7 @@ def cmd_fetch(
     web: Annotated[bool, typer.Option("--web/--no-web", help="Include web search")] = True,
     telegram: Annotated[bool, typer.Option("--telegram/--no-telegram", help="Search Telegram channels")] = True,
 ) -> None:
-    """Search Telegram (per-channel search) and the web for the target; store evidence in SQLite."""
+    """Search Telegram and the web; store only rows that pass the attack-on-civil-facility filter."""
     allowed_df = ("none", "week", "month", "year")
     wdf = web_date_filter.strip().lower()
     if wdf not in allowed_df:
@@ -108,6 +113,7 @@ def cmd_fetch(
         run_id = stats["run_id"]
         added_tg = stats["added_tg"]
         dup_tg = stats["dup_tg"]
+        filtered_tg = stats.get("filtered_tg_non_attack", 0)
         added_web = stats["added_web"]
         dup_web_url = stats["dup_web_url"]
         dup_web_hash = stats["dup_web_hash"]
@@ -115,6 +121,7 @@ def cmd_fetch(
         web_serp = stats["web_serp"]
         web_serp_ar = stats["web_serp_ar"]
         web_serp_en = stats["web_serp_en"]
+        filtered_web = stats.get("filtered_web_non_attack", 0)
         if web and web_serp == 0:
             console.print(
                 "[yellow]web_serp=0[/yellow]: no result rows after "
@@ -126,11 +133,12 @@ def cmd_fetch(
             f"  web: web_serp={web_serp if web else 0} "
             f"web_serp_ar={web_serp_ar if web else 0} "
             f"web_serp_en={web_serp_en if web else 0} "
-            f"inserted={added_web} dedup_url={dup_web_url} dedup_body={dup_web_hash}"
+            f"inserted={added_web} dedup_url={dup_web_url} dedup_body={dup_web_hash} "
+            f"filtered_non_attack={filtered_web}"
         )
         console.print(
             f"[green]Done[/green] run_id={run_id} target={target!r}\n"
-            f"  telegram: inserted={added_tg} deduped={dup_tg}\n"
+            f"  telegram: inserted={added_tg} deduped={dup_tg} filtered_non_attack={filtered_tg}\n"
             f"{web_line}"
         )
         if web_failed_status:
@@ -164,9 +172,10 @@ def cmd_scrape_telegram(
             include_telegram=True,
             channels=[ch],
         )
+        ft = stats.get("filtered_tg_non_attack", 0)
         console.print(
             f"[green]Done[/green] run_id={stats['run_id']} channel=@{ch} target={target!r}\n"
-            f"  telegram: inserted={stats['added_tg']} deduped={stats['dup_tg']}"
+            f"  telegram: inserted={stats['added_tg']} deduped={stats['dup_tg']} filtered_non_attack={ft}"
         )
     finally:
         session.close()
@@ -664,7 +673,7 @@ def cmd_extract(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 20,
 ) -> None:
-    """Run LLM extraction per evidence row; store JSON in classification_json (local Ollama)."""
+    """Extract attack-on-civil-facility fields per row; merge JSON into classification_json (Ollama)."""
     id_list = _parse_id_list_cli(ids) if ids else []
     if not id_list and not target:
         console.print("[red]Provide --target or --ids[/red]")
@@ -697,7 +706,10 @@ def cmd_extract(
                 data = normalize_extraction_dict(data)
                 merge_classification_json(session, r.id, data)
                 session.commit()
-                console.print(f"[green]ok[/green] id={r.id} facility_type={data.get('facility_type')!r}")
+                console.print(
+                    f"[green]ok[/green] id={r.id} attack_occurred={data.get('attack_occurred')!r} "
+                    f"attack_type={data.get('attack_type')!r} facility_type={data.get('facility_type')!r}"
+                )
             except OllamaChatError as e:
                 console.print(f"[red]id={r.id} Ollama:[/red] {e}")
                 err = json.dumps({"error": "ollama", "message": str(e)}, ensure_ascii=False)
@@ -730,7 +742,7 @@ def cmd_classify(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 20,
 ) -> None:
-    """Run 9-flag war-crimes classifier (Ollama); stored under classification_json.war_crimes_classifier."""
+    """War-crimes triage + civil-facility attack relevance (Ollama); merges into classification_json.war_crimes_classifier."""
     id_list = _parse_id_list_cli(ids) if ids else []
     if not id_list and not target:
         console.print("[red]Provide --target or --ids[/red]")
@@ -847,7 +859,7 @@ def cmd_query(
             console.print(
                 f"[yellow]Local hits={len(ids)} < threshold={fetch_threshold}[/yellow] — running fetch…"
             )
-            perform_fetch(
+            fetch_stats = perform_fetch(
                 session,
                 target=query_text,
                 lang=lang,
@@ -857,6 +869,11 @@ def cmd_query(
                 include_telegram=telegram,
             )
             fetched = True
+            console.print(
+                "[dim]fetch ingest filter: "
+                f"tg_non_attack={fetch_stats.get('filtered_tg_non_attack', 0)} "
+                f"web_non_attack={fetch_stats.get('filtered_web_non_attack', 0)}[/dim]"
+            )
             ids = _collect_ids()
 
         if not ids:

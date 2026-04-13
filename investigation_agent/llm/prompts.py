@@ -37,13 +37,19 @@ def summarize_user_prompt(evidence_context: str) -> str:
 Write a concise bullet-point summary. Each line must end with [evidence:ID]."""
 
 
-EXTRACT_SYSTEM = """You extract structured fields from a single evidence item for analyst review (not legal proof).
+EXTRACT_SYSTEM = """You extract structured fields about a possible ATTACK ON A CIVIL FACILITY from one evidence item (not legal proof).
+Focus on the violent event against the site (bombing, shelling, strike, raid, fire, siege, etc.), not general background about the facility.
 Return ONLY a single JSON object with keys:
 - facility_name (string or empty)
-- facility_type: one of hospital, school, shelter, other, unknown
+- facility_type: one of hospital, school, shelter, mosque, clinic, other, unknown
 - location_text (string or empty)
-- date_text (string or empty)
+- date_text (string or empty; legacy, event date if visible)
+- attack_occurred (boolean): true only if the text describes violence/damage/targeting of the civil site
+- attack_type: one of airstrike, shelling, raid, fire, damage, siege, other, unknown
+- attack_date_text (string or empty; when the attack/event is said to have happened)
+- damage_text (string or empty; damage to the facility or patients/staff)
 - casualties_text (string or empty)
+- perpetrator_claim_text (string or empty; who is blamed or said to have carried out the attack, if stated)
 - confidence (number from 0 to 1)
 No markdown, no commentary outside JSON."""
 
@@ -63,21 +69,24 @@ Return the JSON object only."""
 
 
 CLASSIFY_SYSTEM = """You classify a single evidence text for analyst triage (not legal proof).
+The focus is violence against CIVILIAN infrastructure (hospitals, schools, shelters, places of worship, etc.), not general news mentioning a facility.
 Return ONLY one JSON object with these EXACT keys (no extras, no markdown):
 - civilian_deaths (boolean)
 - targeting_civilians (boolean)
 - blocking_aid (boolean)
 - destroying_homes (boolean)
-- targeting_facilities (boolean)
+- targeting_facilities (boolean): true ONLY if the text describes attacking, damaging, or destroying a civilian facility or people inside it (not merely naming the facility in a non-violent context)
 - forced_displacement (boolean)
 - systematic_violence (boolean)
 - is_official_speech (boolean)
 - is_genocidal (boolean)
 For EACH flag above, also output <flag_name>_confidence as a number from 0 to 1.
+- civil_facility_attack_relevance (number 0 to 1): how strongly this text is about an attack on a civil facility (not general facility operations)
+- civil_facility_attack_rationale (short string: one sentence, same language as the text when possible)
 - explanation (short string: why these labels, same language as the text when possible)
 - overall_confidence (number 0 to 1)
 
-Use true/false only for booleans. If the text is irrelevant or insufficient, set all flags false and explain briefly."""
+Use true/false only for booleans. If the text is irrelevant or insufficient, set all flags false, set civil_facility_attack_relevance to 0, and explain briefly."""
 
 
 def classify_user_prompt(evidence_id: int, url: str, source_type: str, text: str) -> str:

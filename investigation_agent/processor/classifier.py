@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from investigation_agent.db.schema import Evidence
+
 # Boolean flags from Telescraper classifier JSON schema
 WAR_CRIMES_BOOLEAN_KEYS: tuple[str, ...] = (
     "civilian_deaths",
@@ -29,6 +31,7 @@ def _clamp_confidence(v: Any) -> float:
 def normalize_war_crimes_classifier(data: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize LLM output: 9 booleans, per-flag confidence, explanation, overall.
+    Also preserves optional civil-facility attack triage keys when present.
     Unknown keys dropped; missing keys default to False / 0.0 / empty string.
     """
     out: dict[str, Any] = {}
@@ -51,4 +54,23 @@ def normalize_war_crimes_classifier(data: dict[str, Any]) -> dict[str, Any]:
 
     out["overall_confidence"] = overall
 
+    rel = data.get("civil_facility_attack_relevance")
+    if rel is not None:
+        out["civil_facility_attack_relevance"] = _clamp_confidence(rel)
+    rat = data.get("civil_facility_attack_rationale")
+    if rat is not None:
+        out["civil_facility_attack_rationale"] = str(rat).strip()
+
     return out
+
+
+def civil_facility_attack_relevance(evidence: Evidence) -> float:
+    """Read normalized 0..1 score from merged war_crimes_classifier JSON, if any."""
+    from investigation_agent.processor.extractor import parse_classification
+
+    data = parse_classification(evidence)
+    wc = data.get("war_crimes_classifier")
+    if not isinstance(wc, dict):
+        return 0.0
+    v = wc.get("civil_facility_attack_relevance")
+    return _clamp_confidence(v)

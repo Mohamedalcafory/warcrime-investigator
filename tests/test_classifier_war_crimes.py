@@ -25,3 +25,17 @@ def test_normalize_war_crimes_classifier_parses_strings():
     assert out["civilian_deaths"] is True
     assert out["is_genocidal"] is False
     assert out["overall_confidence"] == 0.7
+
+
+def test_normalize_war_crimes_classifier_optional_civil_keys():
+    out = normalize_war_crimes_classifier(
+        {
+            "targeting_facilities": True,
+            "civil_facility_attack_relevance": 0.8,
+            "civil_facility_attack_rationale": "قصف المستشفى",
+            "explanation": "x",
+            "overall_confidence": 0.6,
+        }
+    )
+    assert out["civil_facility_attack_relevance"] == 0.8
+    assert "مستشفى" in out["civil_facility_attack_rationale"]

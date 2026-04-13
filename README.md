@@ -1,11 +1,13 @@
 # Investigation Agent
 
-Collect evidence for a **named target** (e.g. a hospital or school) by:
+Collect and triage evidence about **attacks on civil facilities** (hospitals, schools, shelters, places of worship, etc.) for a **named target** by:
 
 - Searching configured **Telegram channels** for messages matching the target (not full-channel dumps).
 - Running a **bilingual (Arabic + English) keyword web search** and extracting article text.
 
-Everything is stored in **SQLite** with source URLs for manual review.
+**Ingestion filter:** Telegram and web hits are stored only if they pass a deterministic keyword check for **civil-facility context** and **attack/violence** language (English + Arabic). General facility news (e.g. reopenings, equipment) without attack language is dropped. Tune or extend keywords in `investigation_agent/processor/attack_filter.py` if needed.
+
+Everything that passes the filter is stored in **SQLite** with source URLs for manual review.
 
 ## Setup
 
@@ -25,7 +27,7 @@ First Telegram login will prompt for a code in the terminal and create `investig
 ## Usage
 
 ```bash
-# Fetch Telegram + web for a target (default: both)
+# Fetch Telegram + web for a target (default: both); non-attack facility-only hits are counted as filtered
 investigate fetch "Al Shifa Hospital"
 
 # Arabic target, web only
@@ -54,7 +56,7 @@ investigate review set --ids 50:110 --status approved
 investigate summarize --target "مجمع" --limit 8 --approved-only
 ```
 
-`investigate fetch` prints ingestion stats: Telegram inserted vs deduped, **`web_serp=N`** (total unique URLs after bilingual SERP merge and before fetch), **`web_serp_ar`** / **`web_serp_en`** (how many of those URLs came from the Arabic vs English SERP pass; same URL in both counts once, Arabic wins), web inserted vs URL/body-hash dedupes, and counts of inserted rows whose fetch status was not `ok`. **`--max-web`** is a **shared cap** across Arabic + English (merged list, deduped by normalized URL). Use **`--web-date-filter`** (`none` \| `week` \| `month` \| `year`) to pass a ddgs **timelimit** on both SERP passes; the run stores this on **`search_runs.web_date_filter`**, and each **`search_results`** row stores **`serp_region`**, **`serp_pass`** (`ar` \| `en`), and **`date_filter_applied`**. Web search uses the **[`ddgs`](https://pypi.org/project/ddgs/)** package. If **`web_serp=0`**, the CLI prints a yellow hint: empty SERP, blocking, or network issues — try again, increase `--max-web`, set **`DDGS_PROXY`** if you need a proxy, or use **`--no-web`** to skip web.
+`investigate fetch` prints ingestion stats: Telegram inserted vs deduped and **`filtered_non_attack`** (rows skipped by the attack-on-civil-facility filter), **`web_serp=N`** (total unique URLs after bilingual SERP merge and before fetch), **`web_serp_ar`** / **`web_serp_en`** (how many of those URLs came from the Arabic vs English SERP pass; same URL in both counts once, Arabic wins), web inserted vs URL/body-hash dedupes, web **`filtered_non_attack`**, and counts of inserted rows whose fetch status was not `ok`. **`--max-web`** is a **shared cap** across Arabic + English (merged list, deduped by normalized URL). Use **`--web-date-filter`** (`none` \| `week` \| `month` \| `year`) to pass a ddgs **timelimit** on both SERP passes; the run stores this on **`search_runs.web_date_filter`**, and each **`search_results`** row stores **`serp_region`**, **`serp_pass`** (`ar` \| `en`), and **`date_filter_applied`**. Web search uses the **[`ddgs`](https://pypi.org/project/ddgs/)** package. If **`web_serp=0`**, the CLI prints a yellow hint: empty SERP, blocking, or network issues — try again, increase `--max-web`, set **`DDGS_PROXY`** if you need a proxy, or use **`--no-web`** to skip web.
 
 ### Candidate clusters (heuristic matching)
 
@@ -170,11 +172,11 @@ RUN_LLM=1 ./scripts/smoke_eval.sh
 
 ## Command Reference
 
-Use `investigate --help` for live help text.
+Use `investigate --help` for live help text. The CLI is **attack-focused**: evidence is filtered at ingest; `extract`/`classify`/`summarize` describe or triage **violence against civil facilities**, not generic facility background.
 
 ### Top-level commands
 
-- `fetch` - ingest Telegram + web evidence for a target
+- `fetch` - ingest Telegram + web evidence for a target (attack-related rows only)
 - `list` - list stored evidence rows
 - `search` - substring search in evidence text/title (SQLite)
 - `semantic-search` - semantic search (Chroma)
