@@ -1,0 +1,27 @@
+"""9-flag war-crimes classifier normalization."""
+
+from investigation_agent.processor.classifier import WAR_CRIMES_BOOLEAN_KEYS, normalize_war_crimes_classifier
+
+
+def test_normalize_war_crimes_classifier_defaults():
+    out = normalize_war_crimes_classifier({})
+    for k in WAR_CRIMES_BOOLEAN_KEYS:
+        assert k in out
+        assert isinstance(out[k], bool)
+        assert f"{k}_confidence" in out
+    assert "explanation" in out
+    assert "overall_confidence" in out
+
+
+def test_normalize_war_crimes_classifier_parses_strings():
+    out = normalize_war_crimes_classifier(
+        {
+            "civilian_deaths": "true",
+            "is_genocidal": False,
+            "explanation": "test",
+            "overall_confidence": 0.7,
+        }
+    )
+    assert out["civilian_deaths"] is True
+    assert out["is_genocidal"] is False
+    assert out["overall_confidence"] == 0.7

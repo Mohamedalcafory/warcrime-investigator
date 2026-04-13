@@ -113,13 +113,55 @@ investigate summarize --target "مجمع الشفاء الطبي" --limit 8
 
 investigate summarize --ids 58,56
 
-# Structured extraction per row (JSON stored in DB column classification_json)
+# Structured extraction per row (JSON merged into classification_json top-level keys)
 investigate extract --target "مجمع الشفاء الطبي" --limit 10
 
 investigate extract --ids 58,55
+
+# 9-flag war-crimes triage (separate schema; stored under classification_json.war_crimes_classifier)
+investigate classify --target "مجمع" --limit 5
+investigate classify --ids 58,55
 ```
 
-Extraction is analyst aid only — verify against sources.
+**Extraction vs classification:** `extract` fills facility/location/casualties-style fields. `classify` fills the legacy-compatible **nine boolean signals** plus per-flag confidence and explanation (see Telescraper-style flags in code). Both merge into `classification_json` without wiping the other block.
+
+### Local-first query (semantic + substring, optional fetch)
+
+Searches **Chroma** (semantic) and **SQLite** (substring), then summarizes with Ollama. If local hits are below `--fetch-threshold`, runs a normal **`fetch`** (unless `--local-only` or `--no-auto-fetch-on-miss`).
+
+```bash
+investigate query "hospital strike Gaza" --fetch-threshold 3
+investigate query "مستشفى" --target "غزة" --local-only
+```
+
+### Telegram-only scrape (single channel)
+
+```bash
+investigate scrape telegram "search phrase" --channel mychannel
+```
+
+### Review queue alias
+
+```bash
+investigate review queue
+# same idea as: investigate candidates list --status pending
+```
+
+Extraction and classification are analyst aids only — verify against sources.
+
+### Residual risks
+
+- **Web fetch:** many news sites return 403 or fail DNS; you still store the SERP row with non-ok fetch status.
+- **Large DBs:** `candidates generate` can create many clusters; tune `--evidence-limit`, `--min-score`, and promote only after review.
+- **Ollama:** `query`, `classify`, `extract`, `summarize`, `ask` need a running model (`ollama serve`).
+
+### Evaluation smoke
+
+```bash
+./scripts/smoke_eval.sh
+# optional LLM touch (needs Ollama):
+RUN_LLM=1 ./scripts/smoke_eval.sh
+```
 
 ## Data
 

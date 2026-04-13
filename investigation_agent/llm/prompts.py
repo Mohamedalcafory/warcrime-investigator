@@ -60,3 +60,35 @@ text:
 {body}
 
 Return the JSON object only."""
+
+
+CLASSIFY_SYSTEM = """You classify a single evidence text for analyst triage (not legal proof).
+Return ONLY one JSON object with these EXACT keys (no extras, no markdown):
+- civilian_deaths (boolean)
+- targeting_civilians (boolean)
+- blocking_aid (boolean)
+- destroying_homes (boolean)
+- targeting_facilities (boolean)
+- forced_displacement (boolean)
+- systematic_violence (boolean)
+- is_official_speech (boolean)
+- is_genocidal (boolean)
+For EACH flag above, also output <flag_name>_confidence as a number from 0 to 1.
+- explanation (short string: why these labels, same language as the text when possible)
+- overall_confidence (number 0 to 1)
+
+Use true/false only for booleans. If the text is irrelevant or insufficient, set all flags false and explain briefly."""
+
+
+def classify_user_prompt(evidence_id: int, url: str, source_type: str, text: str) -> str:
+    body = (text or "").strip()
+    if len(body) > 12000:
+        body = body[:12000] + "\n[...truncated...]"
+    return f"""evidence_id={evidence_id}
+source_type={source_type}
+url={url}
+
+text:
+{body}
+
+Return the JSON object only with the exact keys requested."""

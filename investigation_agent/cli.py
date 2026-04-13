@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -15,22 +14,18 @@ from rich.table import Table
 from investigation_agent.config import telegram_channels
 from investigation_agent.db.session import get_session_factory, init_db
 from investigation_agent.db.schema import Evidence
-from investigation_agent.db.insert_types import InsertStatus
 from investigation_agent.processor.review_queue import generate_candidate_clusters
 from investigation_agent.agent import InvestigationTools, run_react
 from investigation_agent.db.store import (
-    add_search_run,
-    create_search_result,
     get_cluster_evidence_ids,
     get_evidence_by_ids,
     get_evidence_by_target,
-    get_or_create_web_source,
-    insert_evidence,
     list_candidate_clusters,
     list_evidence,
     list_evidence_by_review_status,
     list_incidents,
     merge_candidate_clusters,
+    merge_classification_json,
     pipeline_counts,
     promote_candidate_cluster_to_incident,
     search_evidence_text,
@@ -43,23 +38,27 @@ from investigation_agent.retrieval.chroma_store import index_evidence_safe, sema
 from investigation_agent.llm.json_util import parse_json_object
 from investigation_agent.llm.ollama_client import OllamaChatError, chat_completion
 from investigation_agent.llm.prompts import (
+    CLASSIFY_SYSTEM,
     EXTRACT_SYSTEM,
     SUMMARIZE_SYSTEM,
     build_evidence_context,
+    classify_user_prompt,
     extract_user_prompt,
     summarize_user_prompt,
 )
+from investigation_agent.processor.classifier import normalize_war_crimes_classifier
 from investigation_agent.processor.extractor import normalize_extraction_dict
-from investigation_agent.scraper.telegram import search_channels_for_target
-from investigation_agent.scraper.web import WebFetchOutcome, fetch_web_for_target
+from investigation_agent.workflows.ingest import perform_fetch
 
 app = typer.Typer(help="Target-driven evidence collection (Telegram search + web)")
 review_app = typer.Typer(help="Analyst review status for evidence rows")
 candidates_app = typer.Typer(help="Candidate evidence bundles (heuristic matching; analyst review)")
 incidents_app = typer.Typer(help="Reviewed incidents (promoted from candidates)")
+scrape_app = typer.Typer(help="Targeted scraping (Telegram channel search)")
 app.add_typer(review_app, name="review")
 app.add_typer(candidates_app, name="candidates")
 app.add_typer(incidents_app, name="incidents")
+app.add_typer(scrape_app, name="scrape")
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -97,125 +96,31 @@ def cmd_fetch(
     Session = get_session_factory()
     session = Session()
     try:
-        run = add_search_run(
+        stats = perform_fetch(
             session,
-            target_query=target,
-            language=lang,
-            include_telegram=telegram,
-            include_web=web,
-            max_web_results=max_web,
+            target=target,
+            lang=lang,
+            max_web=max_web,
             web_date_filter=wdf,
+            include_web=web,
+            include_telegram=telegram,
         )
-        session.commit()
-        run_id = run.id
-        added_tg = 0
-        dup_tg = 0
-        added_web = 0
-        dup_web_url = 0
-        dup_web_hash = 0
-        web_failed_status: dict[str, int] = {}
-        web_serp = 0
-        web_serp_ar = 0
-        web_serp_en = 0
-
-        if telegram:
-            channels = telegram_channels()
-            try:
-                hits = asyncio.run(
-                    search_channels_for_target(
-                        channels=channels,
-                        search_query=target,
-                        limit_per_channel=50,
-                    )
-                )
-            except RuntimeError as e:
-                console.print(f"[yellow]Telegram skipped:[/yellow] {e}")
-                hits = []
-            for h in hits:
-                row, st = insert_evidence(
-                    session,
-                    search_run_id=run_id,
-                    target_query=target,
-                    source_type="telegram",
-                    source_url=h.url,
-                    raw_text=h.text,
-                    title=None,
-                    snippet=h.text[:500] if h.text else None,
-                    channel_username=h.channel_username,
-                    message_id=h.message_id,
-                    fetch_status="ok",
-                )
-                if st == InsertStatus.INSERTED:
-                    added_tg += 1
-                elif st == InsertStatus.DUPLICATE_TELEGRAM:
-                    dup_tg += 1
-            session.commit()
-
-        if web:
-            try:
-                outcome: WebFetchOutcome = fetch_web_for_target(
-                    query=target,
-                    max_results=max_web,
-                    lang=lang,
-                    date_filter=wdf,
-                )
-                web_hits = outcome.hits
-            except Exception as e:
-                console.print(f"[red]Web search failed:[/red] {e}")
-                web_hits = []
-                outcome = WebFetchOutcome(hits=[], raw_serp_ar=0, raw_serp_en=0)
-            web_serp = outcome.web_serp
-            web_serp_ar = outcome.web_serp_ar
-            web_serp_en = outcome.web_serp_en
-            if web_serp == 0:
-                console.print(
-                    "[yellow]web_serp=0[/yellow]: no result rows after "
-                    "bilingual ddgs search + URL extraction. Try --max-web, check network, "
-                    "or use --no-web if Telegram is enough."
-                )
-            for wh in web_hits:
-                sr = create_search_result(
-                    session,
-                    search_run_id=run_id,
-                    result_rank=wh.rank,
-                    result_url=wh.url,
-                    result_title=wh.title or None,
-                    result_snippet=wh.snippet or None,
-                    engine="ddgs",
-                    language=lang,
-                    fetch_status=wh.fetch_status,
-                    fetch_error_detail=wh.fetch_error_detail,
-                    serp_region=wh.region_used,
-                    serp_pass=wh.serp_lang,
-                    date_filter_applied=wh.date_filter_applied,
-                )
-                src = get_or_create_web_source(session, result_url=wh.url)
-                sid = src.id if src else None
-                row, st = insert_evidence(
-                    session,
-                    search_run_id=run_id,
-                    target_query=target,
-                    source_type="web",
-                    source_url=wh.url,
-                    raw_text=wh.raw_text,
-                    title=wh.title or None,
-                    snippet=wh.snippet or None,
-                    serp_rank=wh.rank,
-                    serp_snippet=wh.snippet,
-                    fetch_status=wh.fetch_status,
-                    published_at=wh.published_at,
-                    search_result_id=sr.id,
-                    source_id=sid,
-                )
-                if st == InsertStatus.INSERTED:
-                    added_web += 1
-                    if wh.fetch_status != "ok":
-                        web_failed_status[wh.fetch_status] = web_failed_status.get(wh.fetch_status, 0) + 1
-                elif st == InsertStatus.DUPLICATE_URL:
-                    dup_web_url += 1
-                elif st == InsertStatus.DUPLICATE_HASH:
-                    dup_web_hash += 1
-            session.commit()
+        run_id = stats["run_id"]
+        added_tg = stats["added_tg"]
+        dup_tg = stats["dup_tg"]
+        added_web = stats["added_web"]
+        dup_web_url = stats["dup_web_url"]
+        dup_web_hash = stats["dup_web_hash"]
+        web_failed_status = stats["web_failed_status"]
+        web_serp = stats["web_serp"]
+        web_serp_ar = stats["web_serp_ar"]
+        web_serp_en = stats["web_serp_en"]
+        if web and web_serp == 0:
+            console.print(
+                "[yellow]web_serp=0[/yellow]: no result rows after "
+                "bilingual ddgs search + URL extraction. Try --max-web, check network, "
+                "or use --no-web if Telegram is enough."
+            )
 
         web_line = (
             f"  web: web_serp={web_serp if web else 0} "
@@ -231,6 +136,38 @@ def cmd_fetch(
         if web_failed_status:
             parts = [f"{k}={v}" for k, v in sorted(web_failed_status.items())]
             console.print(f"  web inserted with non-ok status: {', '.join(parts)}")
+    finally:
+        session.close()
+
+
+@scrape_app.command("telegram")
+def cmd_scrape_telegram(
+    target: Annotated[str, typer.Argument(help="Search string for Telethon channel search")],
+    channel: Annotated[str, typer.Option("--channel", "-c", help="Single channel username (without @); overrides TELEGRAM_CHANNELS")],
+    lang: Annotated[str, typer.Option("--lang", "-l", help="Recorded on search run")] = "en",
+) -> None:
+    """Search one Telegram channel for messages matching the target (no web)."""
+    ch = channel.strip().lstrip("@")
+    if not ch:
+        console.print("[red]Provide --channel[/red]")
+        raise typer.Exit(1)
+    Session = get_session_factory()
+    session = Session()
+    try:
+        stats = perform_fetch(
+            session,
+            target=target,
+            lang=lang,
+            max_web=15,
+            web_date_filter="none",
+            include_web=False,
+            include_telegram=True,
+            channels=[ch],
+        )
+        console.print(
+            f"[green]Done[/green] run_id={stats['run_id']} channel=@{ch} target={target!r}\n"
+            f"  telegram: inserted={stats['added_tg']} deduped={stats['dup_tg']}"
+        )
     finally:
         session.close()
 
@@ -355,6 +292,28 @@ def cmd_reindex(
             )
             n += 1
         console.print(f"[green]Indexed[/green] {n} evidence row(s) into Chroma.")
+    finally:
+        session.close()
+
+
+@review_app.command("queue")
+def cmd_review_queue(
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max clusters to show")] = 30,
+) -> None:
+    """Show pending candidate clusters (same as: investigate candidates list --status pending)."""
+    Session = get_session_factory()
+    session = Session()
+    try:
+        rows = list_candidate_clusters(session, status="pending", limit=limit)
+        if not rows:
+            console.print("No pending candidate clusters.")
+            return
+        for c in rows:
+            eids = get_cluster_evidence_ids(session, c.id)
+            console.print(
+                f"[bold]{c.id}[/bold] {c.status}  evidence_ids={eids}",
+                markup=False,
+            )
     finally:
         session.close()
 
@@ -669,8 +628,7 @@ def cmd_extract(
                 )
                 data = parse_json_object(llm_raw)
                 data = normalize_extraction_dict(data)
-                payload = json.dumps(data, ensure_ascii=False)
-                update_classification_json(session, r.id, payload)
+                merge_classification_json(session, r.id, data)
                 session.commit()
                 console.print(f"[green]ok[/green] id={r.id} facility_type={data.get('facility_type')!r}")
             except OllamaChatError as e:
@@ -686,6 +644,176 @@ def cmd_extract(
                 )
                 update_classification_json(session, r.id, err)
                 session.commit()
+    finally:
+        session.close()
+
+
+@app.command("classify")
+def cmd_classify(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Filter evidence by target substring"),
+    ] = None,
+    ids: Annotated[
+        str | None,
+        typer.Option("--ids", help="Comma-separated evidence ids"),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max rows when using --target")] = 20,
+) -> None:
+    """Run 9-flag war-crimes classifier (Ollama); stored under classification_json.war_crimes_classifier."""
+    id_list = _parse_id_list(ids)
+    if not id_list and not target:
+        console.print("[red]Provide --target or --ids[/red]")
+        raise typer.Exit(1)
+
+    Session = get_session_factory()
+    session = Session()
+    try:
+        if id_list:
+            rows = get_evidence_by_ids(session, id_list)
+        else:
+            assert target is not None
+            rows = get_evidence_by_target(session, target_substring=target, limit=limit)
+        if not rows:
+            console.print("No evidence to classify.")
+            raise typer.Exit(0)
+
+        for r in rows:
+            user = classify_user_prompt(r.id, r.source_url, r.source_type, r.raw_text or "")
+            llm_raw = ""
+            try:
+                llm_raw = chat_completion(
+                    [
+                        {"role": "system", "content": CLASSIFY_SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.1,
+                )
+                data = parse_json_object(llm_raw)
+                normalized = normalize_war_crimes_classifier(data)
+                merge_classification_json(session, r.id, {"war_crimes_classifier": normalized})
+                session.commit()
+                console.print(
+                    f"[green]ok[/green] id={r.id} is_genocidal={normalized.get('is_genocidal')!r} "
+                    f"overall={normalized.get('overall_confidence')}"
+                )
+            except OllamaChatError as e:
+                console.print(f"[red]id={r.id} Ollama:[/red] {e}")
+                merge_classification_json(
+                    session,
+                    r.id,
+                    {"war_crimes_classifier": {"error": "ollama", "message": str(e)}},
+                )
+                session.commit()
+            except ValueError as e:
+                console.print(f"[yellow]id={r.id} parse:[/yellow] {e}")
+                merge_classification_json(
+                    session,
+                    r.id,
+                    {
+                        "war_crimes_classifier": {
+                            "error": "parse_failed",
+                            "message": str(e),
+                            "raw": (llm_raw or "")[:2000],
+                        }
+                    },
+                )
+                session.commit()
+    finally:
+        session.close()
+
+
+@app.command("query")
+def cmd_query(
+    query_text: Annotated[str, typer.Argument(help="Question or topic; used for local search and optional fetch")],
+    target: Annotated[
+        Optional[str],
+        typer.Option("--target", "-t", help="Only evidence whose target_query contains this substring"),
+    ] = None,
+    fetch_threshold: Annotated[int, typer.Option("--fetch-threshold", help="Min local hits before skipping fetch")] = 3,
+    local_only: Annotated[bool, typer.Option("--local-only", help="Do not run Telegram/web fetch")] = False,
+    auto_fetch: Annotated[
+        bool,
+        typer.Option("--auto-fetch-on-miss/--no-auto-fetch-on-miss", help="Fetch when local hits are below threshold"),
+    ] = True,
+    lang: Annotated[str, typer.Option("--lang", "-l")] = "en",
+    max_web: Annotated[int, typer.Option("--max-web")] = 15,
+    web_date_filter: Annotated[str, typer.Option("--web-date-filter")] = "none",
+    web: Annotated[bool, typer.Option("--web/--no-web")] = True,
+    telegram: Annotated[bool, typer.Option("--telegram/--no-telegram")] = True,
+) -> None:
+    """Local-first: semantic + substring search; optionally fetch, then summarize (Ollama)."""
+    allowed_df = ("none", "week", "month", "year")
+    wdf = web_date_filter.strip().lower()
+    if wdf not in allowed_df:
+        console.print(f"[red]--web-date-filter must be one of: {', '.join(allowed_df)}[/red]")
+        raise typer.Exit(1)
+
+    Session = get_session_factory()
+    session = Session()
+    try:
+
+        def _collect_ids() -> list[int]:
+            seen: set[int] = set()
+            out: list[int] = []
+            for h in chroma_semantic_search(query_text, limit=80):
+                r = session.get(Evidence, h.evidence_id)
+                if r is None:
+                    continue
+                if target and target.lower() not in (r.target_query or "").lower():
+                    continue
+                if h.evidence_id not in seen:
+                    seen.add(h.evidence_id)
+                    out.append(h.evidence_id)
+            for r in search_evidence_text(session, query=query_text, target_substring=target, limit=40):
+                if r.id not in seen:
+                    seen.add(r.id)
+                    out.append(r.id)
+            return out
+
+        ids = _collect_ids()
+        fetched = False
+        if len(ids) < fetch_threshold and not local_only and auto_fetch:
+            console.print(
+                f"[yellow]Local hits={len(ids)} < threshold={fetch_threshold}[/yellow] — running fetch…"
+            )
+            perform_fetch(
+                session,
+                target=query_text,
+                lang=lang,
+                max_web=max_web,
+                web_date_filter=wdf,
+                include_web=web,
+                include_telegram=telegram,
+            )
+            fetched = True
+            ids = _collect_ids()
+
+        if not ids:
+            console.print("No evidence found locally" + (" after fetch." if fetched else "."))
+            raise typer.Exit(0)
+
+        rows = get_evidence_by_ids(session, ids[: max(15, fetch_threshold)])
+        n_inc = len(list_incidents(session, status=None, limit=50))
+        n_cand = len(list_candidate_clusters(session, status="pending", limit=20))
+        console.print(
+            f"[dim]local_evidence_used={len(rows)} incidents_in_db={n_inc} pending_clusters_shown_cap={n_cand} fetched={fetched}[/dim]"
+        )
+        ctx = build_evidence_context(rows[:12])
+        try:
+            out = chat_completion(
+                [
+                    {"role": "system", "content": SUMMARIZE_SYSTEM},
+                    {"role": "user", "content": summarize_user_prompt(ctx)},
+                ]
+            )
+        except OllamaChatError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(2)
+        console.print(out)
+        console.print("\n[bold]Sources[/bold]")
+        for r in rows[:12]:
+            console.print(f"  id={r.id}  {r.source_url}", markup=False)
     finally:
         session.close()
 

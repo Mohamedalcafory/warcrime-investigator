@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -311,6 +312,39 @@ def update_classification_json(
     if row is None:
         return None
     row.classification_json = json_str
+    return row
+
+
+def merge_classification_json(
+    session: Session,
+    evidence_id: int,
+    updates: dict[str, Any],
+) -> Evidence | None:
+    """
+    Shallow-merge ``updates`` into existing ``classification_json`` object.
+    If ``updates`` contains ``war_crimes_classifier`` dict, it is deep-merged
+    with any existing ``war_crimes_classifier`` object.
+    """
+    row = session.get(Evidence, evidence_id)
+    if row is None:
+        return None
+    try:
+        base: dict[str, Any] = json.loads(row.classification_json or "{}")
+    except json.JSONDecodeError:
+        base = {}
+    if not isinstance(base, dict):
+        base = {}
+    for k, v in updates.items():
+        if k == "war_crimes_classifier" and isinstance(v, dict):
+            existing = base.get("war_crimes_classifier")
+            if isinstance(existing, dict):
+                merged = {**existing, **v}
+            else:
+                merged = dict(v)
+            base["war_crimes_classifier"] = merged
+        else:
+            base[k] = v
+    row.classification_json = json.dumps(base, ensure_ascii=False)
     return row
 
 
