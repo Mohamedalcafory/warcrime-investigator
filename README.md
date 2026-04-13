@@ -259,4 +259,4 @@ Run tests (dev): `pip install -e ".[dev]"` then `pytest`.
 
 ## License
 
-Private / your use case — add a license if you publish the repo.
+This project is licensed under the [MIT License](LICENSE).
